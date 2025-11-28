@@ -290,3 +290,31 @@ st.dataframe(df_filt[["Date", "Time"] + ["maquina", "linea", "categoria", metric
 
 csv_bytes = df_filt.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Descargar datos filtrados (CSV)", csv_bytes, "datos_filtrados.csv", "text/csv")
+
+import seaborn as sns
+
+st.subheader("Mapa de calor de métricas (Heatmap)")
+
+# Copia solo las columnas numéricas
+df_num = df_filt.select_dtypes(include=['float64', 'int64']).copy()
+
+# Agregar fecha como index para verlo por día
+df_num['Date'] = df_filt['Date']
+df_num = df_num.groupby('Date').mean()  # promedio diario
+
+# Si hay demasiadas columnas, limitar a las top 30 por varianza
+if df_num.shape[1] > 30:
+    var_top = df_num.var().sort_values(ascending=False).head(30).index
+    df_num = df_num[var_top]
+    st.info("Mostrando solo las 30 métricas con mayor variabilidad.")
+
+# Crear figura
+fig_hm, ax_hm = plt.subplots(figsize=(14, 6))
+sns.heatmap(df_num.T, cmap="coolwarm", ax=ax_hm)
+
+ax_hm.set_xlabel("Fecha")
+ax_hm.set_ylabel("Métricas")
+ax_hm.set_title("Heatmap de métricas numéricas")
+plt.tight_layout()
+
+st.pyplot(fig_hm)
