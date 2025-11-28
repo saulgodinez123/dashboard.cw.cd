@@ -1,76 +1,64 @@
 import streamlit as st
 import pandas as pd
-
-# Cargar archivos
-df_cd = pd.read_csv('CD_unificado.csv')
-df_cw = pd.read_csv('CW_unificado.csv')
-df_limites = pd.read_excel('Limites en tablas (1).xlsx')
-
-# Mostrar en streamlit
-st.title("Visualización de Archivos de Producción")
-
-st.header("Producción CD (CSV)")
-st.dataframe(df_cd)
-
-st.header("Producción CW (CSV)")
-st.dataframe(df_cw)
-
-st.header("Limites (XLSX)")
-st.dataframe(df_limites)
-
-
-import streamlit as st
-import pandas as pd
 import matplotlib.pyplot as plt
 
-# Lee las bases, ajusta tus rutas
+# Cargar los archivos
 df_cd = pd.read_csv('CD_unificado.csv')
 df_cw = pd.read_csv('CW_unificado.csv')
 df_limites = pd.read_excel('Limites en tablas (1).xlsx')
 
-# Unifica área para todo facilitar
+# Unifica todos los datos y agrega columna 'area'
 df_cd["area"] = "CD"
 df_cw["area"] = "CW"
 df_all = pd.concat([df_cd, df_cw], ignore_index=True)
 
-# Filtros principales
-lineas = df_all['linea'].unique()
-areas = df_all['area'].unique()
-maquinas = df_all['maquina'].unique()
-metricas = [c for c in df_all.columns if c not in ['maquina', 'linea', 'categoria', 'Date', 'Time', 'area']]
+# Obtén filtros únicos
+lineas = df_all['linea'].dropna().unique()
+categorias = df_all['categoria'].dropna().unique()
+maquinas = df_all['maquina'].dropna().unique()
+metricas = [col for col in df_all.columns if col not in 
+            ["maquina", "linea", "categoria", "Date", "Time", "area"] and df_all[col].dtype in ['float64', 'int64']]
 
 st.sidebar.title("Filtros")
 linea_sel = st.sidebar.selectbox("Línea de producción", lineas)
-area_sel = st.sidebar.selectbox("Área", areas)
-maquina_sel = st.sidebar.selectbox("Máquina", df_all[(df_all['linea'] == linea_sel) & (df_all['area'] == area_sel)]['maquina'].unique())
+categoria_sel = st.sidebar.selectbox("Área/Categoría", categorias)
+maquinas_filtradas = df_all[(df_all['linea'] == linea_sel) & (df_all['categoria'] == categoria_sel)]['maquina'].dropna().unique()
+maquina_sel = st.sidebar.selectbox("Máquina", maquinas_filtradas)
 metrica_sel = st.sidebar.selectbox("Métrica", metricas)
+fechas = pd.to_datetime(df_all['Date'], errors='coerce').dropna()
+fecha_min, fecha_max = fechas.min(), fechas.max()
+rango_fechas = st.sidebar.date_input("Rango de fechas", [fecha_min, fecha_max])
 
-# Filtra la data
+# Filtra data
 df_filt = df_all[
     (df_all['linea'] == linea_sel) &
-    (df_all['area'] == area_sel) &
+    (df_all['categoria'] == categoria_sel) &
     (df_all['maquina'] == maquina_sel)
 ]
+df_filt["Date"] = pd.to_datetime(df_filt["Date"], errors='coerce')
+df_filt = df_filt[(df_filt["Date"] >= pd.to_datetime(rango_fechas[0])) & (df_filt["Date"] <= pd.to_datetime(rango_fechas[-1]))]
 
-# Busca límites (ajusta nombres según tu excel)
+# Buscar límites
 limite_row = df_limites[
     (df_limites['maquina'] == maquina_sel) &
-    (df_limites['area'] == area_sel) &
+    (df_limites['categoria'] == categoria_sel) &
     (df_limites['linea'] == linea_sel)
-].iloc[0]
+]
 
-# Visualización con límites
-st.header(f"{linea_sel} / {area_sel} / {maquina_sel}")
-st.write(f"Métrica: {metrica_sel}")
+st.title(f"Dashboard: {linea_sel} / {categoria_sel} / {maquina_sel}")
+st.subheader(f"Métrica: {metrica_sel}")
 
-fig, ax = plt.subplots()
-ax.plot(df_filt["Date"], df_filt[metrica_sel], label=metrica_sel)
-ax.axhline(limite_row['LimiteSuperior'], color='red', linestyle='--', label="Limite superior")
-ax.axhline(limite_row['LimiteInferior'], color='green', linestyle=':', label="Limite inferior")
-ax.legend()
-ax.set_xlabel("Fecha")
-ax.set_ylabel(metrica_sel)
-st.pyplot(fig)
+# Gráfico y visualización de límites
+if not df_filt.empty and not limite_row.empty:
+    fig, ax = plt.subplots()
+    ax.plot(df_filt["Date"], df_filt[metrica_sel], label=metrica_sel)
+    ax.axhline(limite_row.iloc[0]['LimiteSuperior'], color='red', linestyle='--', label="Límite superior")
+    ax.axhline(limite_row.iloc[0]['LimiteInferior'], color='green', linestyle=':', label="Límite inferior")
+    ax.set_xlabel("Fecha")
+    ax.set_ylabel(metrica_sel)
+    ax.legend()
+    st.pyplot(fig)
+else:
+    st.warning("No hay datos o límites disponibles para este filtro.")
 
-# Visualiza la data filtrada, KPIs etc
-st.dataframe(df_filt[[metrica_sel, "Date", "Time", "maquina", "linea", "categoria"]])
+st.dataframe(df_filt[["Date", "Time", "maquina", "linea", "categoria", metrica_sel]])
