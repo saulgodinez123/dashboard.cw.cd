@@ -1,146 +1,122 @@
 import streamlit as st
 import pandas as pd
-import altair as alt
+import plotly.express as px
 
 st.set_page_config(page_title="Dashboard CD/CW", layout="wide")
 
-# =========================================================
-# 1. CARGA LIGERA DE DATOS
-# =========================================================
+# -----------------------------
+# CARGA DE ARCHIVOS
+# -----------------------------
 @st.cache_data
-def load_machine_csv(path):
-    df = pd.read_csv(path)
-
-    # Crear timestamp
-    df["timestamp"] = pd.to_datetime(df["Date"] + " " + df["Time"], errors="coerce")
-
-    # Seleccionar columnas clave
-    id_cols = ["timestamp", "maquina"]
-    id_cols = [c for c in id_cols if c in df.columns]
-
-    # Variables = todo lo demás
-    variable_cols = [c for c in df.columns if c not in id_cols]
-
-    # Convertir a formato largo
-    long_df = df.melt(
-        id_vars=id_cols,
-        value_vars=variable_cols,
-        var_name="variable",
-        value_name="valor"
-    )
-
-    return long_df
-
-
-@st.cache_data
-def load_limits():
+def load_data():
+    df_cd = pd.read_csv("CD_unificado.csv")
+    df_cw = pd.read_csv("CW_unificado.csv")
     lim = pd.read_excel("Limites en tablas (2).xlsx")
 
-    # Normalizar columnas a texto
-    lim.columns = lim.columns.astype(str)
+    # Estandarizamos nombres
+    df_cd.columns = df_cd.columns.str.lower().str.strip()
+    df_cw.columns = df_cw.columns.str.lower().str.strip()
+    lim.columns = lim.columns.str.lower().str.strip()
 
-    rows = []
+    # Unimos CD y CW
+    df_cd["tipo"] = "CD"
+    df_cw["tipo"] = "CW"
+    df = pd.concat([df_cd, df_cw], ignore_index=True)
 
-    for _, r in lim.iterrows():
-        # CD
-        if pd.notna(r.get("CD_maquina")):
-            rows.append({
-                "maquina": r.get("CD_maquina"),
-                "variable": r.get("CD_variable"),
-                "LSL": r.get("CD_LSL"),
-                "USL": r.get("CD_USL")
-            })
+    # Convertimos timestamp si existe
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
-        # CW
-        if pd.notna(r.get("CW_maquina")):
-            rows.append({
-                "maquina": r.get("CW_maquina"),
-                "variable": r.get("CW_variable"),
-                "LSL": r.get("CW_LSL"),
-                "USL": r.get("CW_USL")
-            })
+    return df, lim
 
-    return pd.DataFrame(rows)
+df, lim = load_data()
 
+# -----------------------------
+# PREPARAR LÍMITES
+# -----------------------------
+# Suponiendo el formato:
+# columna 0: maquina_cd   / columna 4: maquina_cw
+# columna 1: variable_cd  / columna 5: variable_cw
+# columna 2: lim_inf_cd   / columna 6: lim_inf_cw
+# columna 3: lim_sup_cd   / columna 7: lim_sup_cw
 
-# =========================================================
-# 2. CARGA REAL
-# =========================================================
-cd = load_machine_csv("CD_unificado.csv")
-cw = load_machine_csv("CW_unificado.csv")
-lim = load_limits()
+lim_cd = lim.iloc[:, [0, 1, 2, 3]].copy()
+lim_cd.columns = ["maquina", "variable", "lim_inf", "lim_sup"]
+lim_cd["tipo"] = "CD"
 
-df = pd.concat([cd, cw], ignore_index=True)
+lim_cw = lim.iloc[:, [4, 5, 6, 7]].copy()
+lim_cw.columns = ["maquina", "variable", "lim_inf", "lim_sup"]
+lim_cw["tipo"] = "CW"
 
-# =========================================================
-# 3. FILTROS
-# =========================================================
+lim_clean = pd.concat([lim_cd, lim_cw], ignore_index=True)
 
+# -----------------------------
+# SIDEBAR
+# -----------------------------
 st.sidebar.header("Filtros")
 
-# Detectar CD o CW desde la columna maquina
-tipo = st.sidebar.multiselect(
-    "Tipo de prueba:",
-    ["CD", "CW"],
+# Selección de tipo (CD/CW/Both)
+tipo_select = st.sidebar.multiselect(
+    "Tipo de datos",
+    options=["CD", "CW"],
     default=["CD", "CW"]
 )
 
-df = df[df["maquina"].str.contains("|".join(tipo), case=False, na=False)]
+df_filtered = df[df["tipo"].isin(tipo_select)]
 
-# Filtrar por máquina
-maquinas = sorted(df["maquina"].unique())
-maq_sel = st.sidebar.selectbox("Selecciona la máquina:", maquinas)
+# Máquinas dinámicas
+maquinas = sorted(df_filtered["maquina"].dropna().unique())
+maquina_select = st.sidebar.selectbox("Selecciona máquina", maquinas)
 
-df = df[df["maquina"] == maq_sel]
+df_filtered = df_filtered[df_filtered["maquina"] == maquina_select]
+lim_filtered = lim_clean[lim_clean["maquina"] == maquina_select]
 
-# Variables disponibles
-vars_disp = sorted(df["variable"].unique())
-vars_sel = st.sidebar.multiselect("Selecciona variables:", vars_disp, default=vars_disp[:5])
-
-df = df[df["variable"].isin(vars_sel)]
-
-# =========================================================
-# 4. UNIR LÍMITES
-# =========================================================
-df = df.merge(lim, how="left", on=["maquina", "variable"])
-
-# =========================================================
-# 5. GRÁFICA (SÚPER LIGERA)
-# =========================================================
-st.header("Tendencia en el tiempo con límites")
-
-chart = (
-    alt.Chart(df)
-    .mark_line()
-    .encode(
-        x="timestamp:T",
-        y="valor:Q",
-        color="variable:N"
-    )
+# Variables automáticas
+variables = sorted(df_filtered["variable"].dropna().unique())
+vars_select = st.sidebar.multiselect(
+    "Variables",
+    options=variables,
+    default=variables  # Todas seleccionadas automáticamente
 )
 
-base = chart
+df_filtered = df_filtered[df_filtered["variable"].isin(vars_select)]
+lim_filtered = lim_filtered[lim_filtered["variable"].isin(vars_select)]
 
-# Línea LSL
-if df["LSL"].notna().any():
-    lsl_chart = (
-        alt.Chart(df[df["LSL"].notna()])
-        .mark_rule(color="red", strokeDash=[4,4])
-        .encode(y="LSL:Q")
+# -----------------------------
+# GRÁFICOS
+# -----------------------------
+st.title("Dashboard CD / CW — Líneas de Tiempo con Límites")
+
+if df_filtered.empty:
+    st.warning("No hay datos para los filtros seleccionados.")
+    st.stop()
+
+# Unimos límites por variable (NO por 'maquina' para evitar KeyError)
+plot_df = df_filtered.merge(
+    lim_filtered,
+    on=["variable", "tipo"],
+    how="left"
+)
+
+# Para cada variable, hacemos un gráfico
+for var in vars_select:
+    temp = plot_df[plot_df["variable"] == var]
+
+    st.subheader(f"{maquina_select} — {var}")
+
+    fig = px.line(
+        temp,
+        x="timestamp",
+        y="valor",
+        title=f"{var}",
+        markers=True
     )
-    base = base + lsl_chart
 
-# Línea USL
-if df["USL"].notna().any():
-    usl_chart = (
-        alt.Chart(df[df["USL"].notna()])
-        .mark_rule(color="red", strokeDash=[4,4])
-        .encode(y="USL:Q")
-    )
-    base = base + usl_chart
+    # Agregamos límites si existen
+    if temp["lim_sup"].notna().any():
+        fig.add_hline(y=temp["lim_sup"].iloc[0], line_dash="dash", annotation_text="Límite Superior")
 
-st.altair_chart(base.interactive(), use_container_width=True)
+    if temp["lim_inf"].notna().any():
+        fig.add_hline(y=temp["lim_inf"].iloc[0], line_dash="dash", annotation_text="Límite Inferior")
 
-# Mostrar tabla resumida
-st.subheader("Límites encontrados")
-st.dataframe(df[["variable", "LSL", "USL"]].drop_duplicates())
+    st.plotly_chart(fig, use_container_width=True)
