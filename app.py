@@ -1,126 +1,98 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
+import plotly.express as px
 
-# Configuración básica de la aplicación
-st.set_page_config(layout="wide", page_title="Dashboard de Monitoreo de Producción")
+st.set_page_config(page_title="Dashboard Producción", layout="wide")
 
-st.title("📊 MultiVarX - Dashboard de Límites de Calidad de Manufactura")
-
-# 1. Función para cargar datos de producción (CSV)
+# -------------------------
+# 1. Cargar datos
+# -------------------------
 @st.cache_data
-def load_production_data(file_path):
-    """Carga los archivos CSV de producción (CD y CW)."""
-    try:
-        df = pd.read_csv(file_path)
-        # Asumiendo que hay una columna de tiempo o índice en los datos
-        st.success(f"Datos de {file_path} cargados correctamente. Filas: {len(df)}")
-        return df
-    except FileNotFoundError:
-        st.error(f"Error: El archivo {file_path} no fue encontrado.")
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Error al leer {file_path}: {e}")
-        return pd.DataFrame()
+def load_data():
+    cd = pd.read_csv("CD_unificado.csv")
+    cw = pd.read_csv("CW_unificado.csv")
+    limites = pd.read_excel("Limites en tablas (2).xlsx")
 
-# 2. Función para cargar y transformar la tabla de límites (Excel)
-@st.cache_data
-def load_and_process_limits(file_path):
-    """Carga el Excel de límites con encabezados multinivel y lo transforma a formato largo."""
-    try:
-        # Usamos header=[0, 1] para leer los encabezados en dos niveles (FVTx_CD, Variable/Limite)
-        df_limites_wide = pd.read_excel(file_path, header=[0, 1])
-        st.success("Datos de límites cargados correctamente.")
+    # Normalizar columnas
+    limites.columns = [
+        "CD_maquina", "CD_variable", "CD_lim_inf", "CD_lim_sup",
+        "CW_maquina", "CW_variable", "CW_lim_inf", "CW_lim_sup"
+    ]
 
-        # Limpieza y transformación a formato largo
-        all_limits = []
-        # Identificamos los pares de columnas por el primer nivel (FVT7_CD, FVT7_CW, etc.)
-        machines = df_limites_wide.columns.get_level_values(0).unique()
+    # Convertir = a tipo máquina
+    limites_cd = limites[["CD_maquina", "CD_variable", "CD_lim_inf", "CD_lim_sup"]].rename(
+        columns={"CD_maquina": "maquina", "CD_variable": "variable",
+                 "CD_lim_inf": "lim_inf", "CD_lim_sup": "lim_sup"}
+    )
+    limites_cw = limites[["CW_maquina", "CW_variable", "CW_lim_inf", "CW_lim_sup"]].rename(
+        columns={"CW_maquina": "maquina", "CW_variable": "variable",
+                 "CW_lim_inf": "lim_inf", "CW_lim_sup": "lim_sup"}
+    )
 
-        for machine_id in machines:
-            # Selecciona las 3 columnas correspondientes a cada máquina (FVT7_CD, FVT7_CW, etc.)
-            subset = df_limites_wide[machine_id].copy()
-            
-            # Renombra las columnas del segundo nivel para estandarizar
-            subset.columns = ['Variable', 'Limite_Inferior', 'Limite_Superior']
-            
-            # Elimina filas donde 'Variable' es nulo
-            subset = subset.dropna(subset=['Variable'])
-            
-            # Agrega la columna de identificación de la máquina
-            subset['Maquina_Tipo'] = machine_id
-            
-            all_limits.append(subset)
+    limites_total = pd.concat([limites_cd.assign(tipo="CD"),
+                               limites_cw.assign(tipo="CW")])
 
-        # Concatena todos los subconjuntos en un solo DataFrame de formato largo
-        df_limites_long = pd.concat(all_limits, ignore_index=True)
-        return df_limites_long
-        
-    except FileNotFoundError:
-        st.error(f"Error: El archivo {file_path} no fue encontrado.")
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Error al leer el Excel de límites. Verifica la estructura de las cabeceras: {e}")
-        return pd.DataFrame()
+    return cd, cw, limites_total
 
-# --- Rutas de Archivos (Ajustar según tu estructura de GitHub) ---
-CD_FILE = 'CD_unificado.csv'
-CW_FILE = 'CW_unificado.csv'
-LIMITS_FILE = 'Limites en tablas (1).xlsx'
 
-# --- Carga de Datos ---
-df_cd = load_production_data(CD_FILE)
-df_cw = load_production_data(CW_FILE)
-df_limites = load_and_process_limits(LIMITS_FILE)
+cd_df, cw_df, limites_df = load_data()
 
-# --- Unión de Datos de Producción (si tienen la misma estructura) ---
-# Una práctica común es unir los datos de CD y CW en un solo marco
-if not df_cd.empty and not df_cw.empty:
-    df_unificado = pd.concat([df_cd.assign(Tipo='CD'), df_cw.assign(Tipo='CW')], ignore_index=True)
-    st.subheader("Datos Unificados de Producción")
-    st.dataframe(df_unificado.head(5))
+st.title("📊 Dashboard de Control de Producción (CD / CW)")
+
+# -------------------------
+# 2. Selecciones de usuario
+# -------------------------
+tipo = st.sidebar.selectbox("Selecciona tipo de dato", ["CD", "CW"])
+
+if tipo == "CD":
+    df = cd_df
 else:
-    df_unificado = pd.DataFrame()
+    df = cw_df
 
-# --- Visualización de Datos de Límites Transformados ---
-if not df_limites.empty:
-    st.subheader("Tabla de Límites (Formato Largo para Merge)")
-    st.dataframe(df_limites.head(10))
+maquinas = sorted(df["maquina"].unique())
+maquina_select = st.sidebar.selectbox("Selecciona línea de producción", maquinas)
 
-# --- Sección de Desarrollo del Dashboard ---
-st.subheader("Desarrollo: Validación y Visualización de Variables")
+vars_maquina = sorted(df[df["maquina"] == maquina_select]["variable"].unique())
+variable_select = st.sidebar.selectbox("Selecciona variable", vars_maquina)
 
-if not df_unificado.empty and not df_limites.empty:
-    # Este es el punto de partida para tu dashboard:
-    # 1. Selecciona una Maquina/Tipo y una Variable.
-    # 2. Busca sus límites en df_limites.
-    # 3. Filtra y grafica los datos en df_unificado, comparándolos con los límites.
-    
-    # Ejemplo Sencillo de Interacción
-    available_machines = df_limites['Maquina_Tipo'].unique()
-    if available_machines.size > 0:
-        selected_machine = st.selectbox("Selecciona una Maquina (Ejemplo):", available_machines)
-        
-        # Filtra las variables para la máquina seleccionada
-        limits_for_machine = df_limites[df_limites['Maquina_Tipo'] == selected_machine]
-        available_variables = limits_for_machine['Variable'].unique()
+# -------------------------
+# 3. Filtrar datos
+# -------------------------
+filtro = df[(df["maquina"] == maquina_select) & (df["variable"] == variable_select)]
 
-        # Usamos una variable de ejemplo para mostrar la lógica
-        if 'Get Angle1' in available_variables:
-             variable_to_check = 'Get Angle1'
-             limit_row = limits_for_machine[limits_for_machine['Variable'] == variable_to_check].iloc[0]
-             
-             lower = limit_row['Limite_Inferior']
-             upper = limit_row['Limite_Superior']
-             
-             # En la práctica, necesitarías una columna de Maquina + Tipo para un 'merge' completo.
-             # Por ahora, mostramos la lógica.
-             st.write(f"**Límites para {selected_machine} - {variable_to_check}:** Inferior={lower}, Superior={upper}")
-             
-             # Aquí iría el código para filtrar df_unificado y graficar con Plotly/Matplotlib
-             # donde los límites superior e inferior se muestran como líneas de control.
-             
-        else:
-             st.info("Selecciona otra variable de tu interés para continuar el desarrollo.")
-    
-# --- Fin del Archivo app.py ---
+# Obtener límites
+lim = limites_df[
+    (limites_df["maquina"] == maquina_select) &
+    (limites_df["variable"] == variable_select) &
+    (limites_df["tipo"] == tipo)
+]
+
+if lim.empty:
+    st.warning("⚠ No existen límites de control definidos para esta variable.")
+    lim_inf = None
+    lim_sup = None
+else:
+    lim_inf = lim["lim_inf"].values[0]
+    lim_sup = lim["lim_sup"].values[0]
+
+# -------------------------
+# 4. Mostrar tabla
+# -------------------------
+st.subheader("📄 Datos filtrados")
+st.dataframe(filtro)
+
+# -------------------------
+# 5. Gráfica
+# -------------------------
+st.subheader("📈 Gráfica de la variable")
+
+fig = px.line(filtro, x="timestamp", y="valor", title=f"{maquina_select} - {variable_select}")
+
+# Límites de control
+if lim_inf is not None:
+    fig.add_hline(y=lim_inf, line_dash="dot", annotation_text="Límite Inferior", opacity=0.7)
+
+if lim_sup is not None:
+    fig.add_hline(y=lim_sup, line_dash="dot", annotation_text="Límite Superior", opacity=0.7)
+
+st.plotly_chart(fig, use_container_width=True)
