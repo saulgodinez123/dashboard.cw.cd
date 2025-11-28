@@ -25,6 +25,127 @@ df_all = pd.concat([df_cd, df_cw], ignore_index=True)
 df_limites = {}
 excel_limites = pd.ExcelFile("Limites en tablas (1).xlsx")
 
+# ============================================
+#      GRÁFICAS ADICIONALES EN TABS
+# ============================================
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "Control Chart (X-MR)", 
+    "Histograma con Límites", 
+    "Boxplot (dispersión)",
+    "Tendencia por Hora",
+    "Pareto de Status"
+])
+
+# ------------------------------
+# TAB 1 – CONTROL CHART (X-MR)
+# ------------------------------
+with tab1:
+    st.subheader("Control Chart (X-MR)")
+
+    if len(df_filt) > 3:
+        df_cc = df_filt.sort_values("Date")
+        df_cc["MR"] = df_cc[metrica_sel].diff().abs()
+
+        fig, ax = plt.subplots(2, 1, figsize=(10, 7))
+
+        # X Chart
+        ax[0].plot(df_cc["Date"], df_cc[metrica_sel], marker="o")
+        ax[0].set_title("X Chart")
+        ax[0].grid(True)
+
+        # MR Chart
+        ax[1].plot(df_cc["Date"], df_cc["MR"], color="orange", marker="o")
+        ax[1].set_title("MR Chart")
+        ax[1].grid(True)
+
+        st.pyplot(fig)
+    else:
+        st.warning("No hay suficientes datos para gráfica de control.")
+
+# ------------------------------
+# TAB 2 – HISTOGRAMA
+# ------------------------------
+with tab2:
+    st.subheader("Histograma")
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.hist(df_filt[metrica_sel].dropna(), bins=20, alpha=0.7)
+
+    # Límites si existen
+    if not lim_row.empty:
+        li = lim_row.iloc[0]["limite inferior"]
+        ls = lim_row.iloc[0]["limite superior"]
+        ax.axvline(li, color="green", linestyle="--", label="Límite inferior")
+        ax.axvline(ls, color="red", linestyle="--", label="Límite superior")
+
+    ax.set_xlabel(metrica_sel)
+    ax.set_ylabel("Frecuencia")
+    ax.legend()
+
+    st.pyplot(fig)
+
+# ------------------------------
+# TAB 3 – BOXPLOT COMPARATIVO
+# ------------------------------
+with tab3:
+    st.subheader("Boxplot de dispersión por máquina")
+
+    df_box = df_all[
+        (df_all["linea"] == linea_sel) &
+        (df_all["categoria"] == categoria_sel)
+    ]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    df_box.boxplot(column=metrica_sel, by="maquina", ax=ax, grid=False, rot=45)
+
+    ax.set_title(f"Dispersión de {metrica_sel} por máquina")
+    ax.set_ylabel(metrica_sel)
+
+    st.pyplot(fig)
+
+# ------------------------------
+# TAB 4 – TENDENCIA POR HORA
+# ------------------------------
+with tab4:
+    st.subheader("Tendencia por Hora (promedio)")
+
+    if "Hour" in df_filt.columns:
+        df_temp = df_filt.copy()
+        df_temp["Hour"] = pd.to_numeric(df_temp["Hour"], errors="coerce")
+
+        df_hour = df_temp.groupby("Hour")[metrica_sel].mean().reset_index()
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(df_hour["Hour"], df_hour[metrica_sel], marker="o")
+        ax.set_xlabel("Hora")
+        ax.set_ylabel(metrica_sel)
+        ax.grid(True)
+
+        st.pyplot(fig)
+    else:
+        st.warning("No existe columna 'Hour' en los datos.")
+
+# ------------------------------
+# TAB 5 – PARETO DE STATUS
+# ------------------------------
+with tab5:
+    st.subheader("Pareto de Status (fallas más comunes)")
+
+    if "Status" in df_filt.columns:
+        df_status = df_filt["Status"].value_counts().reset_index()
+        df_status.columns = ["Status", "Count"]
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.bar(df_status["Status"], df_status["Count"])
+        ax.set_xticklabels(df_status["Status"], rotation=45, ha="right")
+        ax.set_ylabel("Cantidad")
+
+        st.pyplot(fig)
+    else:
+        st.warning("No existe columna Status en los datos.")
+
+
 for sheet in excel_limites.sheet_names:
     df = excel_limites.parse(sheet)
     df.columns = df.columns.str.lower().str.strip()
@@ -146,3 +267,11 @@ else:
 
 st.write("### Datos filtrados")
 st.dataframe(df_filt[["Date", "Time", "maquina", "linea", "categoria", metrica_sel]])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "Control Chart", 
+    "Histograma", 
+    "Boxplot", 
+    "Tendencia por Hora",
+    "Pareto de Status"
+])
+
