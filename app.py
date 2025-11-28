@@ -25,10 +25,18 @@ categoria_sel = st.sidebar.selectbox("Área/Categoría", categorias)
 maquinas_filtradas = df_all[(df_all['linea'] == linea_sel) & (df_all['categoria'] == categoria_sel)]['maquina'].dropna().unique()
 maquina_sel = st.sidebar.selectbox("Máquina", maquinas_filtradas)
 metrica_sel = st.sidebar.selectbox("Métrica", metricas)
-fechas = pd.to_datetime(df_all['Date'], errors='coerce').dropna()
-fecha_min, fecha_max = fechas.min(), fechas.max()
-rango_fechas = st.sidebar.date_input("Rango de fechas", [fecha_min, fecha_max])
+import datetime
 
+# Convierte la columna 'Date' a formato datetime, ignorando valores no válidos
+fechas = pd.to_datetime(df_all['Date'], errors='coerce')
+fechas_validas = fechas.dropna()
+
+if len(fechas_validas) > 0:
+    fecha_min, fecha_max = fechas_validas.min().date(), fechas_validas.max().date()
+else:
+    fecha_min = fecha_max = datetime.date.today()
+
+rango_fechas = st.sidebar.date_input("Rango de fechas", [fecha_min, fecha_max])
 # Filtra data
 df_filt = df_all[
     (df_all['linea'] == linea_sel) &
