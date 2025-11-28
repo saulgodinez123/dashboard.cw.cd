@@ -42,16 +42,14 @@ cd_raw, cw_raw, limites_df = load_data()
 # --------------------------------
 # PREPARAR LISTA DE VARIABLES
 # --------------------------------
-
-# columnas que SÍ son variables (Get_AngleX)
 vars_cd = [c for c in cd_raw.columns if "Get_Angle" in c or "Get Angle" in c]
 vars_cw = [c for c in cw_raw.columns if "Get_Angle" in c or "Get Angle" in c]
 
-# --------------------------------
-# CONVERTIR A FORMATO LONG
-# --------------------------------
 
-def melt_df(df, variables):
+# --------------------------------
+# FUNCIÓN PARA FORMATO LONG
+# --------------------------------
+def melt_df(df, variables, tipo):
     long_df = df.melt(
         id_vars=["maquina","Date","Time"],
         value_vars=variables,
@@ -59,60 +57,100 @@ def melt_df(df, variables):
         value_name="valor"
     )
     long_df["timestamp"] = long_df["Date"].astype(str) + " " + long_df["Time"].astype(str)
+    long_df["tipo"] = tipo
     return long_df
 
-cd_df = melt_df(cd_raw, vars_cd)
-cw_df = melt_df(cw_raw, vars_cw)
+cd_df = melt_df(cd_raw, vars_cd, "CD")
+cw_df = melt_df(cw_raw, vars_cw, "CW")
+
 
 # --------------------------------
-# UI STREAMLIT
+# SIDEBAR UI
 # --------------------------------
-st.title("📊 Dashboard de Límites CD / CW")
+st.sidebar.title("Filtros")
 
-tipo = st.sidebar.selectbox("Tipo de datos", ["CD", "CW"])
+tipo_sel = st.sidebar.multiselect(
+    "Selecciona tipo de datos",
+    ["CD", "CW"],
+    default=["CD"]  # por defecto CD
+)
 
-df = cd_df if tipo=="CD" else cw_df
+# unir según selección
+if tipo_sel == ["CD"]:
+    df = cd_df
+elif tipo_sel == ["CW"]:
+    df = cw_df
+else:
+    df = pd.concat([cd_df, cw_df])
 
+# máquinas según la selección
 maquinas = sorted(df["maquina"].unique())
-maq = st.sidebar.selectbox("Máquina", maquinas)
 
-df_m = df[df["maquina"] == maq]
+maq_select = st.sidebar.multiselect(
+    "Máquinas",
+    maquinas,
+    default=maquinas[:2]  # las primeras 2 por default
+)
 
-variables = sorted(df_m["variable"].unique())
-var = st.sidebar.selectbox("Variable", variables)
+df = df[df["maquina"].isin(maq_select)]
 
-df_v = df_m[df_m["variable"] == var]
+# variables disponibles
+variables = sorted(df["variable"].unique())
 
-# --------------------------------
-# EXTRAER LÍMITES
-# --------------------------------
-lim = limites_df[
-    (limites_df["maquina"] == maq) &
-    (limites_df["variable"] == var.replace("_","").replace(" ","")) &
-    (limites_df["tipo"] == tipo)
-]
+var_select = st.sidebar.selectbox("Variable", variables)
 
-lim_inf = lim["lim_inf"].values[0] if not lim.empty else None
-lim_sup = lim["lim_sup"].values[0] if not lim.empty else None
 
 # --------------------------------
-# TABLA DE DATOS
+# FILTRO FINAL
+# --------------------------------
+df_plot = df[df["variable"] == var_select]
+
+
+# --------------------------------
+# OBTENER LÍMITES (solo si CD o CW seleccionados individualmente)
+# Si es ambos, no se ponen límites
+# --------------------------------
+lim_inf = None
+lim_sup = None
+
+if len(tipo_sel) == 1:
+    tipo_actual = tipo_sel[0]
+
+    lim_match = limites_df[
+        (limites_df["tipo"] == tipo_actual) &
+        (limites_df["maquina"].isin(maq_select)) &
+        (limites_df["variable"] == var_select.replace("_","").replace(" ",""))
+    ]
+
+    if not lim_match.empty:
+        lim_inf = lim_match["lim_inf"].iloc[0]
+        lim_sup = lim_match["lim_sup"].iloc[0]
+
+
+# --------------------------------
+# TABLA
 # --------------------------------
 st.subheader("📄 Datos filtrados")
-st.dataframe(df_v)
+st.dataframe(df_plot)
+
 
 # --------------------------------
-# GRAFICAR
+# GRÁFICA
 # --------------------------------
-fig = px.line(df_v, x="timestamp", y="valor",
-              title=f"{maq} — {var}")
+fig = px.line(
+    df_plot,
+    x="timestamp",
+    y="valor",
+    color="tipo",     # CD / CW
+    line_group="maquina",
+    title=f"Comportamiento de {var_select} para máquinas seleccionadas"
+)
 
 if lim_inf is not None:
-    fig.add_hline(y=lim_inf, line_dash="dot",
-                  annotation_text="Límite Inferior")
+    fig.add_hline(y=lim_inf, line_dash="dot", annotation_text="Límite Inferior")
 
 if lim_sup is not None:
-    fig.add_hline(y=lim_sup, line_dash="dot",
-                  annotation_text="Límite Superior")
+    fig.add_hline(y=lim_sup, line_dash="dot", annotation_text="Límite Superior")
 
 st.plotly_chart(fig, use_container_width=True)
+
