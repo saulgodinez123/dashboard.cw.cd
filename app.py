@@ -1,156 +1,145 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+import altair as alt
 
-st.set_page_config(page_title="Dashboard CD/CW", layout="wide")
-
-# --------------------------------
+# ====================================================
 # CARGA DE DATOS
-# --------------------------------
+# ====================================================
+
 @st.cache_data
 def load_data():
-    cd = pd.read_csv("CD_unificado.csv")
-    cw = pd.read_csv("CW_unificado.csv")
+    # Cargar CD y CW
+    df_cd = pd.read_csv("CD_unificado.csv")
+    df_cw = pd.read_csv("CW_unificado.csv")
 
-    limites = pd.read_excel("Limites en tablas (2).xlsx")
-    limites.columns = [
-        "CD_maquina","CD_variable","CD_lim_inf","CD_lim_sup",
-        "CW_maquina","CW_variable","CW_lim_inf","CW_lim_sup"
-    ]
+    df_cd["tipo"] = "CD"
+    df_cw["tipo"] = "CW"
 
-    # convertir limites CD
-    limites_cd = limites[["CD_maquina","CD_variable","CD_lim_inf","CD_lim_sup"]].rename(
-        columns={"CD_maquina":"maquina","CD_variable":"variable",
-                 "CD_lim_inf":"lim_inf","CD_lim_sup":"lim_sup"}
-    )
-    limites_cd["tipo"] = "CD"
+    df = pd.concat([df_cd, df_cw], ignore_index=True)
 
-    # convertir limites CW
-    limites_cw = limites[["CW_maquina","CW_variable","CW_lim_inf","CW_lim_sup"]].rename(
-        columns={"CW_maquina":"maquina","CW_variable":"variable",
-                 "CW_lim_inf":"lim_inf","CW_lim_sup":"lim_sup"}
-    )
-    limites_cw["tipo"] = "CW"
+    # Estandarizar nombres de columnas
+    df.columns = df.columns.str.lower()
 
-    limites_total = pd.concat([limites_cd, limites_cw])
+    # Asegurar nombres esperados
+    # Columnas mínimas necesarias: maquina, variable, valor, timestamp, tipo
+    expected_cols = ["maquina", "variable", "valor", "timestamp", "tipo"]
+    missing = [c for c in expected_cols if c not in df.columns]
+    if missing:
+        st.error(f"Faltan columnas en los CSV: {missing}")
+        st.stop()
 
-    return cd, cw, limites_total
+    # Convertir timestamp
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
+    # Cargar límites
+    lim = pd.read_excel("Limites en tablas (2).xlsx")
+    lim.columns = lim.columns.str.lower()
 
-cd_raw, cw_raw, limites_df = load_data()
+    # Columnas mínimas en límites
+    expected_lim = ["maquina", "variable", "lim_inf", "lim_sup", "tipo"]
+    missing_lim = [c for c in expected_lim if c not in lim.columns]
+    if missing_lim:
+        st.error(f"Faltan columnas en el archivo de límites: {missing_lim}")
+        st.stop()
 
-# --------------------------------
-# PREPARAR LISTA DE VARIABLES
-# --------------------------------
-vars_cd = [c for c in cd_raw.columns if "Get_Angle" in c or "Get Angle" in c]
-vars_cw = [c for c in cw_raw.columns if "Get_Angle" in c or "Get Angle" in c]
-
-
-# --------------------------------
-# FUNCIÓN PARA FORMATO LONG
-# --------------------------------
-def melt_df(df, variables, tipo):
-    long_df = df.melt(
-        id_vars=["maquina","Date","Time"],
-        value_vars=variables,
-        var_name="variable",
-        value_name="valor"
-    )
-    long_df["timestamp"] = long_df["Date"].astype(str) + " " + long_df["Time"].astype(str)
-    long_df["tipo"] = tipo
-    return long_df
-
-cd_df = melt_df(cd_raw, vars_cd, "CD")
-cw_df = melt_df(cw_raw, vars_cw, "CW")
+    return df, lim
 
 
-# --------------------------------
-# SIDEBAR UI
-# --------------------------------
-st.sidebar.title("Filtros")
+df, lim = load_data()
 
-tipo_sel = st.sidebar.multiselect(
-    "Selecciona tipo de datos",
-    ["CD", "CW"],
-    default=["CD"]  # por defecto CD
+# ====================================================
+# INTERFAZ DE USUARIO
+# ====================================================
+
+st.title("Dashboard CD & CW – Líneas de Producción")
+
+st.markdown("""
+Este dashboard permite visualizar variables de proceso para las líneas CD y CW,
+además de sus límites de control configurados.
+""")
+
+# -------- Selección CD o CW (múltiple) --------
+tipo_select = st.multiselect(
+    "Selecciona tipo (CD y/o CW):",
+    options=["CD", "CW"],
+    default=["CD", "CW"]
 )
 
-# unir según selección
-if tipo_sel == ["CD"]:
-    df = cd_df
-elif tipo_sel == ["CW"]:
-    df = cw_df
-else:
-    df = pd.concat([cd_df, cw_df])
+df_tipo = df[df["tipo"].isin(tipo_select)]
 
-# máquinas según la selección
-maquinas = sorted(df["maquina"].unique())
+# -------- Selección de máquina --------
+maquinas = sorted(df_tipo["maquina"].unique())
 
-maq_select = st.sidebar.multiselect(
-    "Máquinas",
-    maquinas,
-    default=maquinas[:2]  # las primeras 2 por default
+if len(maquinas) == 0:
+    st.error("No hay máquinas disponibles para los filtros seleccionados.")
+    st.stop()
+
+maquina_select = st.selectbox("Selecciona la máquina:", maquinas)
+
+df_maquina = df_tipo[df_tipo["maquina"] == maquina_select]
+
+# -------- Selección automática de variables --------
+variables_disponibles = sorted(df_maquina["variable"].unique())
+
+variables_select = st.multiselect(
+    "Variables a visualizar:",
+    options=variables_disponibles,
+    default=variables_disponibles   # ACTIVAR TODAS AUTOMÁTICAMENTE
 )
 
-df = df[df["maquina"].isin(maq_select)]
+df_vars = df_maquina[df_maquina["variable"].isin(variables_select)]
 
-# variables disponibles
-variables = sorted(df["variable"].unique())
-
-var_select = st.sidebar.selectbox("Variable", variables)
-
-
-# --------------------------------
-# FILTRO FINAL
-# --------------------------------
-df_plot = df[df["variable"] == var_select]
-
-
-# --------------------------------
-# OBTENER LÍMITES (solo si CD o CW seleccionados individualmente)
-# Si es ambos, no se ponen límites
-# --------------------------------
-lim_inf = None
-lim_sup = None
-
-if len(tipo_sel) == 1:
-    tipo_actual = tipo_sel[0]
-
-    lim_match = limites_df[
-        (limites_df["tipo"] == tipo_actual) &
-        (limites_df["maquina"].isin(maq_select)) &
-        (limites_df["variable"] == var_select.replace("_","").replace(" ",""))
-    ]
-
-    if not lim_match.empty:
-        lim_inf = lim_match["lim_inf"].iloc[0]
-        lim_sup = lim_match["lim_sup"].iloc[0]
-
-
-# --------------------------------
-# TABLA
-# --------------------------------
-st.subheader("📄 Datos filtrados")
-st.dataframe(df_plot)
-
-
-# --------------------------------
+# ====================================================
 # GRÁFICA
-# --------------------------------
-fig = px.line(
-    df_plot,
-    x="timestamp",
-    y="valor",
-    color="tipo",     # CD / CW
-    line_group="maquina",
-    title=f"Comportamiento de {var_select} para máquinas seleccionadas"
+# ====================================================
+st.subheader("Gráfica de variables seleccionadas")
+
+if df_vars.empty:
+    st.warning("No hay datos disponibles con la selección actual.")
+else:
+    chart = alt.Chart(df_vars).mark_line().encode(
+        x=alt.X("timestamp:T", title="Fecha/Hora"),
+        y=alt.Y("valor:Q", title="Valor"),
+        color="variable:N",
+        tooltip=["timestamp:T", "variable:N", "valor:Q"]
+    ).interactive()
+
+    st.altair_chart(chart, use_container_width=True)
+
+# ====================================================
+# MOSTRAR LÍMITES
+# ====================================================
+st.subheader("Límites de Control")
+
+lim_sel = lim[
+    (lim["maquina"] == maquina_select) &
+    (lim["variable"].isin(variables_select)) &
+    (lim["tipo"].isin(tipo_select))
+]
+
+if len(lim_sel) > 0:
+    st.dataframe(lim_sel)
+else:
+    st.info("No hay límites configurados para esta selección.")
+
+# ====================================================
+# DESCARGA DE DATOS FILTRADOS
+# ====================================================
+st.subheader("Descargar datos filtrados")
+
+def convert_df(df):
+    return df.to_csv(index=False).encode("utf-8")
+
+csv_download = convert_df(df_vars)
+
+st.download_button(
+    label="📥 Descargar CSV",
+    data=csv_download,
+    file_name=f"{maquina_select}_datos_filtrados.csv",
+    mime="text/csv"
 )
 
-if lim_inf is not None:
-    fig.add_hline(y=lim_inf, line_dash="dot", annotation_text="Límite Inferior")
-
-if lim_sup is not None:
-    fig.add_hline(y=lim_sup, line_dash="dot", annotation_text="Límite Superior")
-
-st.plotly_chart(fig, use_container_width=True)
+# ====================================================
+# FIN DEL DASHBOARD
+# ====================================================
 
