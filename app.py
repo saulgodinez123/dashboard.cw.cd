@@ -1,130 +1,158 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
 import datetime
 
 st.set_page_config(page_title="Dashboard CD / CW", layout="wide")
 
 # -------------------------
-# 1) CARGA DE DATOS
+# 1) CARGA DE DATOS (archivos reales)
 # -------------------------
-df_cd = pd.read_csv("CD_unificado.csv")
-df_cw = pd.read_csv("CW_unificado.csv")
+@st.cache_data
+def load_sources():
+    # Archivos que dijiste tener en el repo
+    df_cd = pd.read_csv("CD_unificado.csv")
+    df_cw = pd.read_csv("CW_unificado.csv")
+    # Excel de límites en formato ancho (bloques de 3 columnas por máquina)
+    lim_raw = pd.read_excel("Limites en tablas (1).xlsx", header=None)
+    return df_cd, df_cw, lim_raw
 
-df_cd["area"] = "CD"
-df_cw["area"] = "CW"
+try:
+    df_cd, df_cw, lim_raw = load_sources()
+except FileNotFoundError as e:
+    st.error(f"Archivo no encontrado: {e}. Asegúrate que los archivos están en la raíz del repo con esos nombres.")
+    st.stop()
 
+# -------------------------
+# 2) NORMALIZACIÓN BÁSICA (columnas)
+# -------------------------
+# Añadir área si no existe
+if "area" not in df_cd.columns:
+    df_cd["area"] = "CD"
+if "area" not in df_cw.columns:
+    df_cw["area"] = "CW"
+
+# Unir datasets
 df_all = pd.concat([df_cd, df_cw], ignore_index=True)
 
-# Normalizar nombres de columnas principales para búsquedas (por si hay mayúsculas)
+# Normalizar nombres de columnas: convertir a minúsculas y quitar espacios alrededor
 df_all.columns = df_all.columns.str.strip()
+# Además creamos una versión lowercase para búsquedas consistentes
+df_all.rename(columns={c: c.strip() for c in df_all.columns}, inplace=True)
+
+# Haremos también una versión con nombres lower para accesos cómodos
+df_all.columns = [c.lower() for c in df_all.columns]
+
+# Asegurar algunas columnas clave estén presentes (si no, crear vacías para evitar KeyError)
+for col in ["maquina", "linea", "categoria", "date", "time"]:
+    if col not in df_all.columns:
+        df_all[col] = np.nan
 
 # -------------------------
-# 2) CARGA DE LÍMITES (MULTI-HOJA)
+# 3) TRANSFORMAR LIMPIEZAS DE LÍMITES (formato ancho de 3 columnas por máquina)
 # -------------------------
-limites_path = "Limites en tablas (1).xlsx"
-xls = pd.ExcelFile(limites_path)
+def parse_limits_wide(df_raw):
+    """
+    Recibe lim_raw (header=None) y devuelve df_limites con columnas:
+    maquina (lower), variable (lower), limite_inferior (float), limite_superior (float)
+    """
+    lims = []
+    ncols = df_raw.shape[1]
+    # cada bloque = 3 columnas (variable, limite inferior, limite superior)
+    bloques = ncols // 3
+    for i in range(bloques):
+        start = i * 3
+        # nombre de máquina en la fila 0, columna start
+        raw_name = df_raw.iloc[0, start]
+        if pd.isna(raw_name):
+            continue
+        machine_name = str(raw_name).strip().lower()
+        # obtener datos desde fila 1 hacia abajo
+        block = df_raw.iloc[1:, start:start+3].copy()
+        block.columns = ["variable", "limite_inferior", "limite_superior"]
+        # eliminar filas totalmente vacías en variable
+        for idx, row in block.iterrows():
+            var = row["variable"]
+            if pd.isna(var):
+                continue
+            lims.append({
+                "maquina": machine_name,
+                "variable": str(var).strip().lower(),
+                "limite_inferior": pd.to_numeric(row["limite_inferior"], errors="coerce"),
+                "limite_superior": pd.to_numeric(row["limite_superior"], errors="coerce")
+            })
+    if not lims:
+        return pd.DataFrame(columns=["maquina", "variable", "limite_inferior", "limite_superior"])
+    return pd.DataFrame(lims)
 
-# Diccionario: clave = nombre_de_hoja_lower (ej. 'fvt7_cd') -> dataframe con columnas normalizadas
-df_limites_by_sheet = {}
-for hoja in xls.sheet_names:
-    df_sheet = xls.parse(hoja)
-    # Normalizar nombres de columnas: quitar espacios y pasar a minúsculas
-    df_sheet.columns = df_sheet.columns.str.strip().str.lower()
-    # Asegurar que las columnas esperadas existan: 'variable', 'limite inferior', 'limite superior'
-    # Si tienen nombres ligeramente distintos intentamos mapear
-    cols = df_sheet.columns.tolist()
-    # heurística para encontrar columnas
-    # buscar columna que contenga 'variable' o 'var'
-    var_col = next((c for c in cols if "variable" in c or "var" in c), None)
-    li_col = next((c for c in cols if "limite" in c and "infer" in c), None)
-    ls_col = next((c for c in cols if "limite" in c and "super" in c), None)
-    # si no se detectan, tomar por posición
-    if var_col is None and len(cols) >= 1:
-        var_col = cols[0]
-    if li_col is None and len(cols) >= 2:
-        li_col = cols[1]
-    if ls_col is None and len(cols) >= 3:
-        ls_col = cols[2]
-    # renombrar a estándar
-    mapping = {}
-    if var_col:
-        mapping[var_col] = "variable"
-    if li_col:
-        mapping[li_col] = "limite_inferior"
-    if ls_col:
-        mapping[ls_col] = "limite_superior"
-    df_sheet = df_sheet.rename(columns=mapping)
-    # asegurar que existan las columnas finales
-    if "variable" not in df_sheet.columns:
-        st.warning(f"La hoja '{hoja}' no tiene columna de 'Variable' detectada. Revisa el formato.")
-    if "limite_inferior" not in df_sheet.columns:
-        df_sheet["limite_inferior"] = np.nan
-    if "limite_superior" not in df_sheet.columns:
-        df_sheet["limite_superior"] = np.nan
-    # convertir límites a numéricos
-    df_sheet["limite_inferior"] = pd.to_numeric(df_sheet["limite_inferior"], errors="coerce")
-    df_sheet["limite_superior"] = pd.to_numeric(df_sheet["limite_superior"], errors="coerce")
-    df_limites_by_sheet[hoja.strip().lower()] = df_sheet
+df_limites = parse_limits_wide(lim_raw)
 
 # -------------------------
-# 3) SIDEBAR - FILTROS
+# 4) SIDEBAR - FILTROS
 # -------------------------
 st.sidebar.title("Filtros")
 
-# Líneas, categorías, máquinas (asegurar orden estable)
-lineas = sorted(df_all['linea'].dropna().unique().tolist())
-categorias = sorted(df_all['categoria'].dropna().unique().tolist())
+# Opciones para categoría / linea / maquina (usar valores únicos del df_all)
+categorias = ["Todas"] + sorted(df_all["categoria"].dropna().unique().astype(str).tolist())
+lineas = ["Todas"] + sorted(df_all["linea"].dropna().unique().astype(str).tolist())
 
-linea_sel = st.sidebar.selectbox("Línea", ["Todas"] + lineas)
-categoria_sel = st.sidebar.selectbox("Categoría", ["Todas"] + categorias)
+# máquinas: combinar las de df_all y las de df_limites si faltan
+maquinas_from_data = sorted(df_all["maquina"].dropna().unique().astype(str).tolist())
+maquinas_from_limits = sorted(df_limites["maquina"].dropna().unique().astype(str).tolist())
+maquinas = ["Todas"] + sorted(list(dict.fromkeys(maquinas_from_data + maquinas_from_limits)))
 
-# Filtrar máquinas en base a selecciones previas
-df_tmp = df_all.copy()
-if linea_sel != "Todas":
-    df_tmp = df_tmp[df_tmp["linea"] == linea_sel]
-if categoria_sel != "Todas":
-    df_tmp = df_tmp[df_tmp["categoria"] == categoria_sel]
+categoria_sel = st.sidebar.selectbox("Categoría", categorias)
+linea_sel = st.sidebar.selectbox("Línea", lineas)
+maquina_sel = st.sidebar.selectbox("Máquina", maquinas)
 
-maquinas = sorted(df_tmp["maquina"].dropna().unique().tolist())
-maquina_sel = st.sidebar.selectbox("Máquina", ["Todas"] + maquinas)
-
-# Detectar métricas numéricas (excluir columnas meta)
+# Detectar métricas numéricas válidas (robusto)
 exclude_cols = {"maquina", "linea", "categoria", "date", "time", "area", "status", "serial_number", "model"}
-numeric_cols = [c for c in df_all.columns if c.lower() not in exclude_cols and pd.api.types.is_numeric_dtype(df_all[c])]
-numeric_cols = sorted(numeric_cols)
-if not numeric_cols:
-    st.error("No se encontraron columnas numéricas en el dataset.")
-    st.stop()
-metrica_sel = st.sidebar.selectbox("Métrica", numeric_cols)
+metricas = []
+for c in df_all.columns:
+    if c.lower() in exclude_cols:
+        continue
+    if pd.api.types.is_numeric_dtype(df_all[c]):
+        if df_all[c].notna().sum() > 5 and df_all[c].nunique() > 1:
+            metricas.append(c)
+metricas = sorted(metricas)
 
-# Rango de fechas
-df_all['Date'] = pd.to_datetime(df_all['Date'], errors='coerce')
-fechas_validas = df_all['Date'].dropna()
+if not metricas:
+    st.error("No se detectaron métricas numéricas válidas en el dataset.")
+    st.stop()
+
+metrica_sel = st.sidebar.selectbox("Métrica", metricas)
+
+# Rango de fechas (si existe columna date)
+df_all["date"] = pd.to_datetime(df_all["date"], errors="coerce")
+fechas_validas = df_all["date"].dropna()
 if len(fechas_validas) == 0:
     fecha_min = fecha_max = datetime.date.today()
 else:
-    fecha_min, fecha_max = fechas_validas.min().date(), fechas_validas.max().date()
+    fecha_min = fechas_validas.min().date()
+    fecha_max = fechas_validas.max().date()
 
 rango_fechas = st.sidebar.date_input("Rango de fechas", [fecha_min, fecha_max])
 
-# Botones opcionales
 mostrar_tabs = st.sidebar.checkbox("Mostrar gráficas avanzadas", value=True)
 
 # -------------------------
-# 4) FILTRAR DATAFRAME SEGÚN SELECCIÓN
+# 5) APLICAR FILTROS
 # -------------------------
 df_filt = df_all.copy()
-if linea_sel != "Todas":
-    df_filt = df_filt[df_filt["linea"] == linea_sel]
 if categoria_sel != "Todas":
-    df_filt = df_filt[df_filt["categoria"] == categoria_sel]
+    df_filt = df_filt[df_filt["categoria"].astype(str) == categoria_sel]
+if linea_sel != "Todas":
+    df_filt = df_filt[df_filt["linea"].astype(str) == linea_sel]
 if maquina_sel != "Todas":
-    df_filt = df_filt[df_filt["maquina"] == maquina_sel]
+    # comparaciones insensibles a mayúsculas
+    df_filt = df_filt[df_filt["maquina"].astype(str).str.lower() == maquina_sel.lower()]
 
-df_filt = df_filt[(df_filt["Date"] >= pd.to_datetime(rango_fechas[0])) & (df_filt["Date"] <= pd.to_datetime(rango_fechas[-1]))]
+# aplicar rango de fechas
+df_filt = df_filt[(df_filt["date"] >= pd.to_datetime(rango_fechas[0])) & (df_filt["date"] <= pd.to_datetime(rango_fechas[-1]))]
 
+# Mostrar título
 st.title("Dashboard CD / CW")
 st.subheader(f"{linea_sel} • {categoria_sel} • {maquina_sel}")
 st.markdown(f"**Métrica:** {metrica_sel}")
@@ -134,159 +162,138 @@ if df_filt.empty:
     st.stop()
 
 # -------------------------
-# 5) OBTENER LÍMITES PARA LA MÁQUINA Y MÉTRICA
+# 6) BUSCAR LÍMITES (heurísticas)
 # -------------------------
-lim_row = pd.DataFrame()  # vacío por defecto
+lim_row = pd.DataFrame()
 if maquina_sel != "Todas":
-    # la clave de hoja debería ser, por ejemplo, "fvt7_cd"
-    # Intentaremos buscar usando combinaciones posibles:
-    posibles_claves = [
-        f"{linea_sel}_{categoria_sel}".lower() if linea_sel != "Todas" and categoria_sel != "Todas" else None,
-        maquina_sel.strip().lower(),
-        f"{maquina_sel.strip().lower()}_{categoria_sel.strip().lower()}" if categoria_sel != "Todas" else None,
-        f"{linea_sel.strip().lower()}_{maquina_sel.strip().lower()}" if linea_sel != "Todas" else None
-    ]
-    # remover Nones y duplicados
-    posibles_claves = [k for k in posibles_claves if k]
-    posibles_claves = list(dict.fromkeys(posibles_claves))
-    for clave in posibles_claves:
-        if clave in df_limites_by_sheet:
-            tabla = df_limites_by_sheet[clave]
-            # buscar métrica en la columna 'variable' (case-insensitive)
-            if 'variable' in tabla.columns:
-                lim_row = tabla[tabla['variable'].astype(str).str.lower() == metrica_sel.lower()]
-                if not lim_row.empty:
-                    break
+    # clave directa: maquina
+    key = maquina_sel.strip().lower()
+    cand = df_limites[(df_limites["maquina"] == key) & (df_limites["variable"] == metrica_sel.lower())]
+    if not cand.empty:
+        lim_row = cand
+    else:
+        # intentar buscar por combinaciones: linea_categoria por si en tu naming está así (e.g. fvt7_cd)
+        if linea_sel != "Todas" and categoria_sel != "Todas":
+            key2 = f"{linea_sel.strip().lower()}_{categoria_sel.strip().lower()}"
+            cand2 = df_limites[(df_limites["maquina"] == key2) & (df_limites["variable"] == metrica_sel.lower())]
+            if not cand2.empty:
+                lim_row = cand2
+        # último intento: buscar solo por variable en todo df_limites (si hay un único match)
+        if lim_row.empty:
+            cand3 = df_limites[df_limites["variable"] == metrica_sel.lower()]
+            if len(cand3) == 1:
+                lim_row = cand3
 
 # -------------------------
-# 6) GRÁFICA PRINCIPAL (TENDENCIA) con límites si existen
+# 7) GRÁFICA PRINCIPAL (Plotly) con límites si existen
 # -------------------------
-fig, ax = plt.subplots(figsize=(10, 4))
-ax.plot(df_filt["Date"], df_filt[metrica_sel], marker='o', linewidth=1, label="Medición")
+fig = go.Figure()
+# Asegurar que x tenga nombre; si date no sirve, usar índice
+x = df_filt["date"] if "date" in df_filt.columns else df_filt.index
+
+fig.add_trace(go.Scatter(x=x, y=df_filt[metrica_sel], mode="lines+markers", name=metrica_sel))
 
 if not lim_row.empty:
     li = lim_row.iloc[0].get("limite_inferior", np.nan)
     ls = lim_row.iloc[0].get("limite_superior", np.nan)
     if pd.notna(ls):
-        ax.axhline(ls, color='red', linestyle='--', label="Límite superior")
+        fig.add_hline(y=ls, line_dash="dash", line_color="red", annotation_text="USL")
     if pd.notna(li):
-        ax.axhline(li, color='green', linestyle='--', label="Límite inferior")
+        fig.add_hline(y=li, line_dash="dot", line_color="green", annotation_text="LSL")
 
-ax.set_xlabel("Fecha")
-ax.set_ylabel(metrica_sel)
-ax.set_title(f"Tendencia de {metrica_sel}")
-ax.grid(alpha=0.3)
-ax.legend()
-st.pyplot(fig)
+fig.update_layout(title=f"Tendencia: {metrica_sel}", xaxis_title="Fecha", yaxis_title=metrica_sel, template="plotly_white", height=520)
+st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------
-# 7) KPIs simples
+# 8) KPIs y métricas rápidas
 # -------------------------
-col1, col2, col3 = st.columns(3)
-col1.metric("Registros", len(df_filt))
-col2.metric("Promedio", f"{df_filt[metrica_sel].mean():.3f}")
-col3.metric("Desv. estándar", f"{df_filt[metrica_sel].std():.3f}")
+c1, c2, c3 = st.columns(3)
+c1.metric("Registros", len(df_filt))
+c2.metric("Promedio", f"{df_filt[metrica_sel].mean():.3f}")
+c3.metric("Std Dev", f"{df_filt[metrica_sel].std():.3f}")
 
 # -------------------------
-# 8) GRÁFICAS AVANZADAS EN TABS
+# 9) Gráficas avanzadas (opcionales)
 # -------------------------
 if mostrar_tabs:
-    tabs = st.tabs(["Control X-MR", "Histograma", "Boxplot por Máquina", "Tendencia por Hora", "Pareto Status"])
-    # TAB: X-MR
+    tabs = st.tabs(["Histograma", "Boxplot por Máquina", "Control X-MR", "Pareto Status", "Heatmap (métricas)"])
+
+    # Histograma
     with tabs[0]:
+        st.subheader("Histograma")
+        fig_h = px.histogram(df_filt, x=metrica_sel, nbins=25, title=f"Distribución de {metrica_sel}")
+        # dibujar líneas de límite si existen
+        if not lim_row.empty:
+            if pd.notna(li := lim_row.iloc[0].get("limite_inferior", np.nan)):
+                fig_h.add_vline(x=li, line_dash="dash", line_color="green")
+            if pd.notna(ls := lim_row.iloc[0].get("limite_superior", np.nan)):
+                fig_h.add_vline(x=ls, line_dash="dash", line_color="red")
+        st.plotly_chart(fig_h, use_container_width=True)
+
+    # Boxplot por máquina (si hay más de una máquina en el filtro)
+    with tabs[1]:
+        st.subheader("Boxplot por Máquina")
+        df_box = df_all.copy()
+        if linea_sel != "Todas":
+            df_box = df_box[df_box["linea"] == linea_sel]
+        if categoria_sel != "Todas":
+            df_box = df_box[df_box["categoria"] == categoria_sel]
+        if df_box.empty:
+            st.info("No hay datos para boxplot en la combinación seleccionada.")
+        else:
+            fig_b = px.box(df_box, x="maquina", y=metrica_sel, points="outliers", title=f"Boxplot {metrica_sel} por máquina")
+            st.plotly_chart(fig_b, use_container_width=True)
+
+    # Control X-MR
+    with tabs[2]:
         st.subheader("Control Chart (X-MR)")
         if len(df_filt) >= 4:
-            df_cc = df_filt.sort_values("Date").copy()
-            df_cc["MR"] = df_cc[metrica_sel].diff().abs()
-            fig_cc, (ax_x, ax_mr) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
-            ax_x.plot(df_cc["Date"], df_cc[metrica_sel], marker='o')
-            ax_x.set_title("X Chart")
-            ax_x.grid(alpha=0.3)
-            ax_mr.plot(df_cc["Date"], df_cc["MR"], color='orange', marker='o')
-            ax_mr.set_title("MR Chart")
-            ax_mr.grid(alpha=0.3)
-            st.pyplot(fig_cc)
+            df_cc = df_filt.sort_values("date").copy()
+            df_cc["mr"] = df_cc[metrica_sel].diff().abs()
+            fig_x = px.line(df_cc, x="date", y=metrica_sel, title="X Chart")
+            fig_mr = px.line(df_cc, x="date", y="mr", title="MR Chart")
+            st.plotly_chart(fig_x, use_container_width=True)
+            st.plotly_chart(fig_mr, use_container_width=True)
         else:
             st.info("Se requieren al menos 4 puntos para X-MR.")
 
-    # TAB: HISTOGRAMA
-    with tabs[1]:
-        st.subheader("Histograma con límites")
-        fig_h, ax_h = plt.subplots(figsize=(8, 4))
-        ax_h.hist(df_filt[metrica_sel].dropna(), bins=25, alpha=0.7)
-        if not lim_row.empty:
-            if pd.notna(lim_row.iloc[0].get("limite_inferior")):
-                ax_h.axvline(lim_row.iloc[0]["limite_inferior"], color='green', linestyle='--', label='Límite inferior')
-            if pd.notna(lim_row.iloc[0].get("limite_superior")):
-                ax_h.axvline(lim_row.iloc[0]["limite_superior"], color='red', linestyle='--', label='Límite superior')
-            ax_h.legend()
-        ax_h.set_xlabel(metrica_sel)
-        ax_h.set_ylabel("Frecuencia")
-        st.pyplot(fig_h)
-
-    # TAB: BOXPLOT por máquina
-    with tabs[2]:
-        st.subheader("Boxplot por Máquina (misma línea/categoría)")
-        df_box = df_all.copy()
-        df_box = df_box[(df_box["linea"] == linea_sel) & (df_box["categoria"] == categoria_sel)]
-        if not df_box.empty:
-            fig_b, ax_b = plt.subplots(figsize=(12, 5))
-            # preparar lista de valores por máquina en orden
-            maquinas_order = sorted(df_box["maquina"].dropna().unique().tolist())
-            data_to_plot = [df_box[df_box["maquina"] == m][metrica_sel].dropna().values for m in maquinas_order]
-            ax_b.boxplot(data_to_plot, labels=maquinas_order, showfliers=False)
-            ax_b.set_xticklabels(maquinas_order, rotation=45, ha='right')
-            ax_b.set_ylabel(metrica_sel)
-            ax_b.set_title(f"Boxplot de {metrica_sel} por máquina")
-            st.pyplot(fig_b)
-        else:
-            st.info("No hay datos para boxplot.")
-
-    # TAB: TENDENCIA POR HORA
+    # Pareto Status
     with tabs[3]:
-        st.subheader("Tendencia por Hora (promedio)")
-        if "Hour" in df_filt.columns or "Hour" in df_all.columns or "hour" in df_all.columns:
-            # intentar diferentes nombres de columnas de hora
-            hour_col = None
-            for c in ["Hour", "hour", "Hour "]:
-                if c in df_filt.columns:
-                    hour_col = c
-                    break
-            if hour_col is None:
-                st.info("No se encontró columna 'Hour' en los datos.")
-            else:
-                df_hour = df_filt.copy()
-                df_hour[hour_col] = pd.to_numeric(df_hour[hour_col], errors='coerce')
-                df_hour = df_hour.dropna(subset=[hour_col])
-                df_hour_group = df_hour.groupby(hour_col)[metrica_sel].mean().reset_index()
-                fig_h2, ax_h2 = plt.subplots(figsize=(8, 4))
-                ax_h2.plot(df_hour_group[hour_col], df_hour_group[metrica_sel], marker='o')
-                ax_h2.set_xlabel("Hour")
-                ax_h2.set_ylabel(metrica_sel)
-                ax_h2.grid(alpha=0.3)
-                st.pyplot(fig_h2)
+        st.subheader("Pareto - Status")
+        if "status" in df_filt.columns:
+            df_stat = df_filt["status"].fillna("UNKNOWN").value_counts().reset_index()
+            df_stat.columns = ["status", "count"]
+            fig_p = px.bar(df_stat, x="status", y="count", title="Pareto de Status")
+            st.plotly_chart(fig_p, use_container_width=True)
         else:
-            st.info("No hay columna 'Hour' en los datos para este gráfico.")
+            st.info("No existe columna 'status' en los datos.")
 
-    # TAB: PARETO de Status
+    # Heatmap de métricas (por fecha, promedio diario)
     with tabs[4]:
-        st.subheader("Pareto de Status")
-        if "Status" in df_filt.columns:
-            df_stat = df_filt["Status"].fillna("UNKNOWN").value_counts().reset_index()
-            df_stat.columns = ["Status", "Count"]
-            fig_p, ax_p = plt.subplots(figsize=(8, 4))
-            ax_p.bar(df_stat["Status"], df_stat["Count"])
-            ax_p.set_xticklabels(df_stat["Status"], rotation=45, ha='right')
-            ax_p.set_ylabel("Count")
-            st.pyplot(fig_p)
+        st.subheader("Heatmap (promedio diario de métricas)")
+        numeric = [c for c in df_all.columns if pd.api.types.is_numeric_dtype(df_all[c])]
+        if numeric:
+            df_hm = df_filt.copy()
+            if "date" in df_hm.columns:
+                df_hm = df_hm.groupby("date")[numeric].mean().fillna(0)
+                # limitar columnas si son muchas
+                if df_hm.shape[1] > 30:
+                    top_cols = df_hm.var().sort_values(ascending=False).head(30).index
+                    df_hm = df_hm[top_cols]
+                fig_hm = px.imshow(df_hm.T, labels=dict(x="Fecha", y="Métrica", color="Valor"), aspect="auto", origin="lower")
+                st.plotly_chart(fig_hm, use_container_width=True)
+            else:
+                st.info("No hay columna 'date' para agrupar por día.")
         else:
-            st.info("No existe columna 'Status' en los datos.")
+            st.info("No hay columnas numéricas para heatmap.")
 
 # -------------------------
-# 9) TABLA Y DESCARGA
+# 10) Tabla y descarga
 # -------------------------
-st.markdown("### Datos filtrados")
-st.dataframe(df_filt[["Date", "Time"] + ["maquina", "linea", "categoria", metrica_sel]].drop_duplicates().reset_index(drop=True))
+st.markdown("### Datos filtrados (muestra)")
+cols_show = ["date", "time", "maquina", "linea", "categoria", metrica_sel]
+cols_show = [c for c in cols_show if c in df_filt.columns]
+st.dataframe(df_filt[cols_show].head(500))
 
 csv_bytes = df_filt.to_csv(index=False).encode("utf-8")
-st.download_button("⬇️ Descargar datos filtrados (CSV)", csv_bytes, "datos_filtrados.csv", "text/csv")
+st.download_button("⬇️ Descargar (CSV) datos filtrados", csv_bytes, "datos_filtrados.csv", "text/csv")
