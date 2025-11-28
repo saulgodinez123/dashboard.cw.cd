@@ -18,98 +18,128 @@ cw, cd, limites = load_data()
 
 st.title("📊 Dashboard CD / CW con Límites de Parámetros")
 
+
 #-----------------------------------------------------------
 # LIMPIEZA BÁSICA
 #-----------------------------------------------------------
-# Convertir fechas
-for df in [cw, cd]:
-    for col in ["Date", "Time"]:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
+def clean_datetime(df):
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    if "Time" in df.columns:
+        df["Time"] = pd.to_datetime(df["Time"], errors="coerce")
+    return df
+
+cw = clean_datetime(cw)
+cd = clean_datetime(cd)
+
 
 #-----------------------------------------------------------
 # SELECCIÓN DE DATASET
 #-----------------------------------------------------------
 st.sidebar.header("Filtros")
 dataset = st.sidebar.selectbox("Seleccionar dataset", ["CW", "CD"])
-
 df = cw if dataset == "CW" else cd
+
 
 #-----------------------------------------------------------
 # FILTROS DINÁMICOS SEGÚN COLUMNAS EXISTENTES
 #-----------------------------------------------------------
 
+# FILTRO MODEL
 if "Model" in df.columns:
-    modelo = st.sidebar.multiselect("Modelo", df["Model"].dropna().unique())
-    if modelo:
-        df = df[df["Model"].isin(modelo)]
+    modelos = df["Model"].dropna().unique().tolist()
+    selected_model = st.sidebar.multiselect("Modelo", modelos)
+    if selected_model:
+        df = df[df["Model"].isin(selected_model)]
 
+# FILTRO MÁQUINA (solo CD)
 if "maquina" in df.columns:
-    maq = st.sidebar.multiselect("Máquina", df["maquina"].dropna().unique())
-    if maq:
-        df = df[df["maquina"].isin(maq)]
+    maquinas = df["maquina"].dropna().unique().tolist()
+    selected_maq = st.sidebar.multiselect("Máquina", maquinas)
+    if selected_maq:
+        df = df[df["maquina"].isin(selected_maq)]
 
-# Filtrar por fechas (si existen)
+# FILTRO FECHA
 if "Date" in df.columns:
-    min_d = df["Date"].min()
-    max_d = df["Date"].max()
-    fecha_filtro = st.sidebar.date_input("Rango de fecha", [min_d, max_d])
-    df = df[(df["Date"] >= pd.to_datetime(fecha_filtro[0])) &
-            (df["Date"] <= pd.to_datetime(fecha_filtro[1]))]
+
+    # Convertir y quitar NaT
+    df = df.dropna(subset=["Date"])
+
+    if df.empty:
+        st.warning("No hay fechas válidas en este dataset.")
+    else:
+        # Asegurar formato date()
+        min_d = df["Date"].min().date()
+        max_d = df["Date"].max().date()
+
+        fecha_filtro = st.sidebar.date_input(
+            "Rango de fecha",
+            (min_d, max_d)
+        )
+
+        # Aplicar filtro date_input (siempre regresa tupla)
+        if isinstance(fecha_filtro, tuple) and len(fecha_filtro) == 2:
+            start_date, end_date = fecha_filtro
+            df = df[
+                (df["Date"].dt.date >= start_date) &
+                (df["Date"].dt.date <= end_date)
+            ]
+
 
 #-----------------------------------------------------------
 # SELECCIÓN DE PARÁMETRO
 #-----------------------------------------------------------
-
 parametros_numericos = df.select_dtypes(include="number").columns.tolist()
 
+if not parametros_numericos:
+    st.error("No hay parámetros numéricos disponibles para graficar.")
+    st.stop()
+
 param = st.selectbox("Selecciona un parámetro para graficar", parametros_numericos)
+
 
 #-----------------------------------------------------------
 # OBTENER LÍMITES DESDE EL EXCEL
 #-----------------------------------------------------------
-
 def get_limits(param):
-    """Busca límites del parámetro en el Excel"""
     row = limites[limites["Parametro"] == param]
-
     if row.empty:
         return None, None
 
     try:
-        low = float(row["LSL"].values[0])
-        high = float(row["USL"].values[0])
+        lsl = float(row["LSL"].values[0])
+        usl = float(row["USL"].values[0])
     except:
-        low, high = None, None
+        lsl, usl = None, None
 
-    return low, high
+    return lsl, usl
 
 lsl, usl = get_limits(param)
 
-#-----------------------------------------------------------
-# MÉTRICAS RÁPIDAS
-#-----------------------------------------------------------
 
+#-----------------------------------------------------------
+# KPIs
+#-----------------------------------------------------------
 col1, col2, col3 = st.columns(3)
 col1.metric("Promedio", f"{df[param].mean():.2f}")
 col2.metric("Mínimo", f"{df[param].min():.2f}")
 col3.metric("Máximo", f"{df[param].max():.2f}")
 
+
 #-----------------------------------------------------------
-# GRAFICAR
+# GRÁFICA SERIES DE TIEMPO
 #-----------------------------------------------------------
+st.subheader("📈 Tendencia del parámetro")
 
 fig = go.Figure()
-
 fig.add_trace(go.Scatter(
     x=df["Date"] if "Date" in df.columns else df.index,
     y=df[param],
     mode="lines+markers",
-    name=param,
-    line=dict(width=1)
+    name=param
 ))
 
-# LÍMITES EN LA GRÁFICA
+# Límites
 if lsl is not None:
     fig.add_hline(y=lsl, line_dash="dot", line_color="red", annotation_text="LSL")
 
@@ -117,19 +147,18 @@ if usl is not None:
     fig.add_hline(y=usl, line_dash="dot", line_color="red", annotation_text="USL")
 
 fig.update_layout(
-    title=f"Evolución del parámetro: {param}",
+    height=500,
     xaxis_title="Fecha",
-    yaxis_title=param,
-    height=500
+    yaxis_title=param
 )
 
 st.plotly_chart(fig, use_container_width=True)
 
+
 #-----------------------------------------------------------
 # HISTOGRAMA
 #-----------------------------------------------------------
-
-st.subheader("Distribución del Parámetro")
+st.subheader("📊 Distribución del parámetro")
 
 hist = px.histogram(df, x=param, nbins=50)
 
@@ -141,9 +170,9 @@ if usl is not None:
 
 st.plotly_chart(hist, use_container_width=True)
 
+
 #-----------------------------------------------------------
 # TABLA FINAL
 #-----------------------------------------------------------
-
-st.subheader("Datos filtrados")
+st.subheader("📄 Datos filtrados")
 st.dataframe(df.tail(300))
