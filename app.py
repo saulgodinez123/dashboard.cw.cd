@@ -11,17 +11,18 @@ import plotly.express as px
 def load_data():
     cw = pd.read_csv("CW_unificado.csv", encoding="latin-1")
     cd = pd.read_csv("CD_unificado.csv", encoding="latin-1")
-    limites = pd.read_excel("Limites en tablas (1).xlsx")
+    limites = pd.read_excel("Limites.xlsx")  # Renómbralo según el archivo real
     return cw, cd, limites
 
 cw, cd, limites = load_data()
 
-st.title("📊 Dashboard CD / CW con Límites de Parámetros")
+st.title("📊 Dashboard CD / CW con Límites")
 
 
 #-----------------------------------------------------------
-# LIMPIEZA BÁSICA
+# LIMPIEZA
 #-----------------------------------------------------------
+
 def clean_datetime(df):
     if "Date" in df.columns:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
@@ -42,77 +43,92 @@ df = cw if dataset == "CW" else cd
 
 
 #-----------------------------------------------------------
-# FILTROS DINÁMICOS SEGÚN COLUMNAS EXISTENTES
+# FILTROS DINÁMICOS
 #-----------------------------------------------------------
 
-# FILTRO MODEL
+# Filtro Model
 if "Model" in df.columns:
     modelos = df["Model"].dropna().unique().tolist()
-    selected_model = st.sidebar.multiselect("Modelo", modelos)
-    if selected_model:
-        df = df[df["Model"].isin(selected_model)]
+    sel_model = st.sidebar.multiselect("Modelo", modelos)
+    if sel_model:
+        df = df[df["Model"].isin(sel_model)]
 
-# FILTRO MÁQUINA (solo CD)
+# Filtro máquina en CD
 if "maquina" in df.columns:
     maquinas = df["maquina"].dropna().unique().tolist()
-    selected_maq = st.sidebar.multiselect("Máquina", maquinas)
-    if selected_maq:
-        df = df[df["maquina"].isin(selected_maq)]
+    sel_maq = st.sidebar.multiselect("Máquina", maquinas)
+    if sel_maq:
+        df = df[df["maquina"].isin(sel_maq)]
 
-# FILTRO FECHA
+# Filtro fecha
 if "Date" in df.columns:
-
-    # Convertir y quitar NaT
     df = df.dropna(subset=["Date"])
 
-    if df.empty:
-        st.warning("No hay fechas válidas en este dataset.")
-    else:
-        # Asegurar formato date()
+    if not df.empty:
         min_d = df["Date"].min().date()
         max_d = df["Date"].max().date()
 
-        fecha_filtro = st.sidebar.date_input(
+        fecha = st.sidebar.date_input(
             "Rango de fecha",
             (min_d, max_d)
         )
 
-        # Aplicar filtro date_input (siempre regresa tupla)
-        if isinstance(fecha_filtro, tuple) and len(fecha_filtro) == 2:
-            start_date, end_date = fecha_filtro
+        if isinstance(fecha, tuple) and len(fecha) == 2:
             df = df[
-                (df["Date"].dt.date >= start_date) &
-                (df["Date"].dt.date <= end_date)
+                (df["Date"].dt.date >= fecha[0])
+                & (df["Date"].dt.date <= fecha[1])
             ]
 
 
 #-----------------------------------------------------------
-# SELECCIÓN DE PARÁMETRO
+# PARÁMETROS NUMÉRICOS
 #-----------------------------------------------------------
 parametros_numericos = df.select_dtypes(include="number").columns.tolist()
 
 if not parametros_numericos:
-    st.error("No hay parámetros numéricos disponibles para graficar.")
+    st.error("No hay parámetros numéricos en este dataset")
     st.stop()
 
 param = st.selectbox("Selecciona un parámetro para graficar", parametros_numericos)
 
 
 #-----------------------------------------------------------
-# OBTENER LÍMITES DESDE EL EXCEL
+# LECTURA INTELIGENTE DE LÍMITES
 #-----------------------------------------------------------
+
 def get_limits(param):
-    row = limites[limites["Parametro"] == param]
-    if row.empty:
+    # Buscar columna que contiene el nombre del parámetro
+    posibles_columnas_nombre = ["Parametro", "Parameter", "Variable", "Test", "Nombre"]
+
+    col_param = None
+    for c in posibles_columnas_nombre:
+        if c in limites.columns:
+            col_param = c
+            break
+
+    if col_param is None:
+        st.error("No se encontró una columna de nombre de parámetro en el archivo de límites.")
         return None, None
 
-    try:
-        lsl = float(row["LSL"].values[0])
-        usl = float(row["USL"].values[0])
-    except:
-        lsl, usl = None, None
+    # Buscar columnas de límites
+    posibles_lsl = ["LSL", "Limite inferior", "Lower Limit", "Min", "LSL Value"]
+    posibles_usl = ["USL", "Limite superior", "Upper Limit", "Max", "USL Value"]
 
-    return lsl, usl
+    col_lsl = next((c for c in posibles_lsl if c in limites.columns), None)
+    col_usl = next((c for c in posibles_usl if c in limites.columns), None)
+
+    if col_lsl is None or col_usl is None:
+        st.error("No se encontraron columnas de límites en el archivo.")
+        return None, None
+
+    # Buscar coincidencia exacta del parámetro
+    fila = limites[limites[col_param] == param]
+
+    if fila.empty:
+        return None, None
+
+    return float(fila[col_lsl].iloc[0]), float(fila[col_usl].iloc[0])
+
 
 lsl, usl = get_limits(param)
 
@@ -127,7 +143,7 @@ col3.metric("Máximo", f"{df[param].max():.2f}")
 
 
 #-----------------------------------------------------------
-# GRÁFICA SERIES DE TIEMPO
+# GRÁFICA — SERIE DE TIEMPO
 #-----------------------------------------------------------
 st.subheader("📈 Tendencia del parámetro")
 
@@ -139,7 +155,7 @@ fig.add_trace(go.Scatter(
     name=param
 ))
 
-# Límites
+# Dibujar límites
 if lsl is not None:
     fig.add_hline(y=lsl, line_dash="dot", line_color="red", annotation_text="LSL")
 
@@ -164,7 +180,6 @@ hist = px.histogram(df, x=param, nbins=50)
 
 if lsl is not None:
     hist.add_vline(x=lsl, line_dash="dot", line_color="red")
-
 if usl is not None:
     hist.add_vline(x=usl, line_dash="dot", line_color="red")
 
