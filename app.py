@@ -1,102 +1,149 @@
 import streamlit as st
 import pandas as pd
+import plotly.graph_objects as go
 import plotly.express as px
-import os
 
-# ============================
+#-----------------------------------------------------------
 # CARGA DE ARCHIVOS
-# ============================
+#-----------------------------------------------------------
+
 @st.cache_data
 def load_data():
-    # Buscar automáticamente cualquier Excel en la carpeta
-    archivos = [f for f in os.listdir() if f.lower().endswith(".xlsx")]
+    cw = pd.read_csv("CW_unificado.csv", encoding="latin-1")
+    cd = pd.read_csv("CD_unificado.csv", encoding="latin-1")
+    limites = pd.read_excel("Limites en tablas (1).xlsx")
+    return cw, cd, limites
 
-    if len(archivos) == 0:
-        st.error("No se encontró ningún archivo .xlsx en el directorio.")
-        return None
-    
-    archivo = archivos[0]  # toma el primero
-    df = pd.read_excel(archivo)
+cw, cd, limites = load_data()
 
-    return df
+st.title("📊 Dashboard CD / CW con Límites de Parámetros")
 
-df = load_data()
+#-----------------------------------------------------------
+# LIMPIEZA BÁSICA
+#-----------------------------------------------------------
+# Convertir fechas
+for df in [cw, cd]:
+    for col in ["Date", "Time"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
 
-if df is None:
-    st.stop()
+#-----------------------------------------------------------
+# SELECCIÓN DE DATASET
+#-----------------------------------------------------------
+st.sidebar.header("Filtros")
+dataset = st.sidebar.selectbox("Seleccionar dataset", ["CW", "CD"])
 
-st.title("Dashboard CD / CW")
+df = cw if dataset == "CW" else cd
 
-# ============================
-# OBTENER OPCIONES DINÁMICAS
-# ============================
+#-----------------------------------------------------------
+# FILTROS DINÁMICOS SEGÚN COLUMNAS EXISTENTES
+#-----------------------------------------------------------
 
-# Buscar columna que identifique estación (FVT100, FVT7, etc)
-col_estacion = None
-for col in df.columns:
-    if "fvt" in col.lower() or "estacion" in col.lower():
-        col_estacion = col
-        break
+if "Model" in df.columns:
+    modelo = st.sidebar.multiselect("Modelo", df["Model"].dropna().unique())
+    if modelo:
+        df = df[df["Model"].isin(modelo)]
 
-if col_estacion is None:
-    st.error("No se encontró columna de estación (FVT...).")
-    st.stop()
+if "maquina" in df.columns:
+    maq = st.sidebar.multiselect("Máquina", df["maquina"].dropna().unique())
+    if maq:
+        df = df[df["maquina"].isin(maq)]
 
-# CD / CW
-col_cd_cw = None
-for col in df.columns:
-    if col.lower() in ["cd/cw", "mode", "tipo", "cdcw"]:
-        col_cd_cw = col
-        break
+# Filtrar por fechas (si existen)
+if "Date" in df.columns:
+    min_d = df["Date"].min()
+    max_d = df["Date"].max()
+    fecha_filtro = st.sidebar.date_input("Rango de fecha", [min_d, max_d])
+    df = df[(df["Date"] >= pd.to_datetime(fecha_filtro[0])) &
+            (df["Date"] <= pd.to_datetime(fecha_filtro[1]))]
 
-if col_cd_cw is None:
-    st.error("No se encontró columna CD/CW.")
-    st.stop()
+#-----------------------------------------------------------
+# SELECCIÓN DE PARÁMETRO
+#-----------------------------------------------------------
 
-# Métricas = todas las columnas numéricas excepto las de identificación
-metric_columns = df.select_dtypes(include="number").columns.tolist()
+parametros_numericos = df.select_dtypes(include="number").columns.tolist()
 
-# ============================
-# SIDEBAR
-# ============================
-with st.sidebar:
-    st.header("Filtros")
+param = st.selectbox("Selecciona un parámetro para graficar", parametros_numericos)
 
-    filtro_estacion = st.selectbox("Estación", ["Todas"] + sorted(df[col_estacion].dropna().unique().tolist()))
-    filtro_cd_cw = st.selectbox("CD/CW", ["Todas"] + sorted(df[col_cd_cw].dropna().unique().tolist()))
-    filtro_metrica = st.selectbox("Métrica", metric_columns)
+#-----------------------------------------------------------
+# OBTENER LÍMITES DESDE EL EXCEL
+#-----------------------------------------------------------
 
-# ============================
-# FILTRAR DATOS
-# ============================
-df_filtro = df.copy()
+def get_limits(param):
+    """Busca límites del parámetro en el Excel"""
+    row = limites[limites["Parametro"] == param]
 
-if filtro_estacion != "Todas":
-    df_filtro = df_filtro[df_filtro[col_estacion] == filtro_estacion]
+    if row.empty:
+        return None, None
 
-if filtro_cd_cw != "Todas":
-    df_filtro = df_filtro[df_filtro[col_cd_cw] == filtro_cd_cw]
+    try:
+        low = float(row["LSL"].values[0])
+        high = float(row["USL"].values[0])
+    except:
+        low, high = None, None
 
-# ============================
-# VALIDAR SI HAY DATOS
-# ============================
-if df_filtro.empty:
-    st.warning("No hay registros para los filtros seleccionados.")
-    st.stop()
+    return low, high
 
-# ============================
-# EJEMPLO DE GRÁFICA
-# ============================
-st.subheader(f"Distribución de la métrica: {filtro_metrica}")
+lsl, usl = get_limits(param)
 
-fig = px.histogram(
-    df_filtro,
-    x=filtro_metrica,
-    nbins=20,
-    title=f"Histograma de {filtro_metrica}"
+#-----------------------------------------------------------
+# MÉTRICAS RÁPIDAS
+#-----------------------------------------------------------
+
+col1, col2, col3 = st.columns(3)
+col1.metric("Promedio", f"{df[param].mean():.2f}")
+col2.metric("Mínimo", f"{df[param].min():.2f}")
+col3.metric("Máximo", f"{df[param].max():.2f}")
+
+#-----------------------------------------------------------
+# GRAFICAR
+#-----------------------------------------------------------
+
+fig = go.Figure()
+
+fig.add_trace(go.Scatter(
+    x=df["Date"] if "Date" in df.columns else df.index,
+    y=df[param],
+    mode="lines+markers",
+    name=param,
+    line=dict(width=1)
+))
+
+# LÍMITES EN LA GRÁFICA
+if lsl is not None:
+    fig.add_hline(y=lsl, line_dash="dot", line_color="red", annotation_text="LSL")
+
+if usl is not None:
+    fig.add_hline(y=usl, line_dash="dot", line_color="red", annotation_text="USL")
+
+fig.update_layout(
+    title=f"Evolución del parámetro: {param}",
+    xaxis_title="Fecha",
+    yaxis_title=param,
+    height=500
 )
 
 st.plotly_chart(fig, use_container_width=True)
 
-# Mostrar tabla filtrada
-st.dataframe(df_filtro)
+#-----------------------------------------------------------
+# HISTOGRAMA
+#-----------------------------------------------------------
+
+st.subheader("Distribución del Parámetro")
+
+hist = px.histogram(df, x=param, nbins=50)
+
+if lsl is not None:
+    hist.add_vline(x=lsl, line_dash="dot", line_color="red")
+
+if usl is not None:
+    hist.add_vline(x=usl, line_dash="dot", line_color="red")
+
+st.plotly_chart(hist, use_container_width=True)
+
+#-----------------------------------------------------------
+# TABLA FINAL
+#-----------------------------------------------------------
+
+st.subheader("Datos filtrados")
+st.dataframe(df.tail(300))
