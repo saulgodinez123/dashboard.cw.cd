@@ -67,6 +67,10 @@ def melt_df(df, variables):
 cd_df = melt_df(cd_raw, vars_cd)
 cw_df = melt_df(cw_raw, vars_cw)
 
+# Convertir valores a numérico (evita errores con mean, hist, box, etc.)
+cd_df["valor"] = pd.to_numeric(cd_df["valor"], errors="coerce")
+cw_df["valor"] = pd.to_numeric(cw_df["valor"], errors="coerce")
+
 # --------------------------------
 # UI STREAMLIT
 # --------------------------------
@@ -84,6 +88,10 @@ df_m = df[df["maquina"] == maq]
 variables = sorted(df_m["variable"].unique())
 var = st.sidebar.selectbox("Variable", variables)
 df_v = df_m[df_m["variable"] == var].copy()
+
+# Conversión adicional segura
+df_v["valor"] = pd.to_numeric(df_v["valor"], errors="coerce")
+df_v = df_v.dropna(subset=["valor"])
 
 var_norm = normalizar_variable(var)
 
@@ -115,14 +123,22 @@ st.subheader("📌 Indicadores clave (KPI)")
 
 col1, col2, col3 = st.columns(3)
 
+if df_v.empty:
+    promedio = 0
+    ultimo = 0
+    fuera_pct = 0
+else:
+    promedio = df_v["valor"].mean()
+    ultimo = df_v["valor"].iloc[-1]
+    fuera_pct = df_v["fuera"].mean() * 100
+
 with col1:
-    st.metric("Promedio", f"{df_v['valor'].mean():.2f}")
+    st.metric("Promedio", f"{promedio:.2f}")
 
 with col2:
-    st.metric("Último valor", f"{df_v['valor'].iloc[-1]:.2f}")
+    st.metric("Último valor", f"{ultimo:.2f}")
 
 with col3:
-    fuera_pct = df_v["fuera"].mean() * 100
     st.metric("% Fuera de límites", f"{fuera_pct:.1f}%")
 
 # --------------------------------
@@ -136,16 +152,18 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 # CONTROL CHART
 # --------------------------------
 with tab1:
+
+    if df_v.empty:
+        st.warning("No hay datos válidos para graficar.")
+        st.stop()
+
     st.subheader("📈 Gráfico de Control")
 
     fig = px.line(df_v, x="timestamp", y="valor", title=f"{maq} — {var}")
 
-    # Media
     media = df_v["valor"].mean()
-    fig.add_hline(y=media, line_dash="solid", line_color="blue",
-                  annotation_text="Media")
+    fig.add_hline(y=media, line_dash="solid", line_color="blue", annotation_text="Media")
 
-    # Límites
     if lim_inf is not None:
         fig.add_hline(y=lim_inf, line_dash="dot", line_color="red",
                       annotation_text="Límite Inferior")
@@ -153,7 +171,6 @@ with tab1:
         fig.add_hline(y=lim_sup, line_dash="dot", line_color="red",
                       annotation_text="Límite Superior")
 
-    # Banda
     if lim_inf is not None and lim_sup is not None:
         fig.add_shape(
             type="rect",
@@ -164,17 +181,16 @@ with tab1:
             fillcolor="green",
             opacity=0.15,
             layer="below",
-            line_width=0
+            line_width=0,
         )
 
-    # Puntos fuera
     df_fuera = df_v[df_v["fuera"] == True]
     fig.add_scatter(
         x=df_fuera["timestamp"],
         y=df_fuera["valor"],
         mode="markers",
         marker=dict(color="red", size=10),
-        name="Fuera de control"
+        name="Fuera de control",
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -183,6 +199,11 @@ with tab1:
 # HISTOGRAMA
 # --------------------------------
 with tab2:
+
+    if df_v.empty:
+        st.warning("No hay datos para histograma.")
+        st.stop()
+
     st.subheader("📊 Histograma")
 
     fig_hist = px.histogram(df_v, x="valor", nbins=30)
@@ -198,6 +219,11 @@ with tab2:
 # BOXPLOT
 # --------------------------------
 with tab3:
+
+    if df_v.empty:
+        st.warning("No hay datos para boxplot.")
+        st.stop()
+
     st.subheader("📦 Boxplot")
 
     fig_box = px.box(df_v, y="valor", points="outliers")
@@ -207,6 +233,11 @@ with tab3:
 # SCATTER
 # --------------------------------
 with tab4:
+
+    if df_v.empty:
+        st.warning("No hay datos para scatter.")
+        st.stop()
+
     st.subheader("🔵 Dispersión")
 
     fig_scatter = px.scatter(df_v, x="timestamp", y="valor", opacity=0.7)
@@ -222,6 +253,11 @@ with tab4:
 # PROMEDIO POR HORA
 # --------------------------------
 with tab5:
+
+    if df_v.empty:
+        st.warning("No hay datos para agrupar por hora.")
+        st.stop()
+
     st.subheader("🕒 Promedio por hora")
 
     try:
