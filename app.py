@@ -1,151 +1,185 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
+import sys
+import os
+from io import StringIO, BytesIO
 
-st.set_page_config(layout="wide")
+st.set_page_config(page_title="Dashboard - Límites", layout="wide")
 
-# ===============================
-# CARGA DE ARCHIVOS
-# ===============================
-df_cd = pd.read_csv("CD_unificado.csv")
-df_cw = pd.read_csv("CW_unificado.csv")
-df_limites = pd.read_excel("Limites en tablas (1).xlsx")
+expected_cols = ["maquina", "variable", "LimiteInferior", "LimiteSuperior"]
 
-# Unifica data
-df_cd["area"] = "CD"
-df_cw["area"] = "CW"
-df_all = pd.concat([df_cd, df_cw], ignore_index=True)
+def normalize_df_limites(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Intenta normalizar df para que tenga exactamente las columnas:
+    ["maquina", "variable", "LimiteInferior", "LimiteSuperior"]
 
-# ===============================
-# LIMPIEZA DE TABLA DE LÍMITES
-# ===============================
-# Estructura esperada:
-# columna0 = maquina
-# columna1 = variable/métrica
-# columna2 = Límite inferior
-# columna3 = Límite superior
+    Realiza varios intentos automáticos y, si no puede, lanza ValueError.
+    """
+    cols = df.columns.tolist()
+    n_actual = len(cols)
 
-df_limites.columns = ["maquina", "variable", "LimiteInferior", "LimiteSuperior"]
+    # Caso ideal
+    if n_actual == len(expected_cols):
+        df = df.copy()
+        df.columns = expected_cols
+        return df
 
-# ===============================
-# FILTROS
-# ===============================
-st.sidebar.title("Filtros")
+    # Intento 1: quitar columnas "Unnamed" típicas (índice incluido al guardar CSV)
+    unnamed = [c for c in cols if str(c).startswith("Unnamed") or str(c).strip() == ""]
+    if unnamed and (n_actual - len(unnamed)) == len(expected_cols):
+        df = df.drop(columns=unnamed).copy()
+        df.columns = expected_cols
+        return df
 
-lineas = df_all["linea"].dropna().unique()
-categorias = df_all["categoria"].dropna().unique()
+    # Intento 2: si la primera columna parece un índice numérico 0..n-1 y sobra una columna
+    try:
+        first_col = df.iloc[:, 0]
+        if pd.api.types.is_integer_dtype(first_col) or pd.api.types.is_float_dtype(first_col):
+            # Comprobar si los primeros valores son 0,1,2,...
+            sample = first_col.dropna().iloc[:10].astype(int).tolist()
+            if sample == list(range(len(sample))):
+                df2 = df.iloc[:, 1:].copy()
+                if df2.shape[1] == len(expected_cols):
+                    df2.columns = expected_cols
+                    return df2
+    except Exception:
+        pass
 
-linea_sel = st.sidebar.selectbox("Línea", lineas)
-categoria_sel = st.sidebar.selectbox("Categoría", categorias)
+    # Intento 3: mapear por palabras clave en nombres de columnas (ignorando mayúsculas y espacios)
+    cleaned = [str(c).strip() for c in cols]
+    mapped = []
+    for c in cleaned:
+        c_low = c.lower().replace(" ", "").replace("_", "")
+        if "maquina" in c_low or "maquin" in c_low or "machine" in c_low:
+            mapped.append("maquina")
+        elif "variable" in c_low or "var" == c_low:
+            mapped.append("variable")
+        elif "inferior" in c_low or "min" in c_low:
+            mapped.append("LimiteInferior")
+        elif "superior" in c_low or "max" in c_low:
+            mapped.append("LimiteSuperior")
+        else:
+            mapped.append(None)
+    if all(m is not None for m in mapped) and len(mapped) == len(expected_cols):
+        df2 = df.copy()
+        df2.columns = mapped
+        return df2
 
-maquinas_filtradas = df_all[
-    (df_all["linea"] == linea_sel) &
-    (df_all["categoria"] == categoria_sel)
-]["maquina"].dropna().unique()
+    # No se pudo normalizar automáticamente
+    raise ValueError(
+        f"No se pueden asignar las columnas esperadas {expected_cols}. "
+        f"El DataFrame tiene {n_actual} columnas. Columnas actuales: {cols}."
+    )
 
-maquina_sel = st.sidebar.selectbox("Máquina", maquinas_filtradas)
+def load_csv_from_uploaded_or_default(uploaded_file):
+    """
+    Lee CSV desde el archivo subido por el usuario o desde rutas por defecto.
+    Devuelve un DataFrame o None si no se encontró ninguno.
+    """
+    if uploaded_file is not None:
+        try:
+            # Pandas detectará correctamente si es bytes o buffer
+            return pd.read_csv(uploaded_file)
+        except Exception as e:
+            st.error(f"Error al leer el archivo subido: {e}")
+            return None
 
-# Detecta métricas numéricas
-metricas = [
-    col for col in df_all.columns
-    if col not in ["maquina", "linea", "categoria", "Date", "Time", "area"]
-    and df_all[col].dtype in ["float64", "int64"]
-]
+    # Intentar rutas por defecto
+    candidates = ["data/limites.csv", "limites.csv", "./data/limites.csv"]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                return pd.read_csv(path)
+            except Exception as e:
+                st.error(f"Error al leer {path}: {e}")
+                return None
+    return None
 
-metrica_sel = st.sidebar.selectbox("Métrica", metricas)
+# --- Interfaz ---
+st.title("Dashboard - Configuración de límites")
 
-# ===============================
-# RANGO DE FECHAS
-# ===============================
-df_all["Date"] = pd.to_datetime(df_all["Date"], errors="coerce")
+st.markdown("Sube el CSV de límites o deja que la app busque ./data/limites.csv o ./limites.csv")
 
-fechas_validas = df_all["Date"].dropna()
+uploaded = st.file_uploader("Sube el CSV de límites (opcional)", type=["csv"])
 
-fecha_min = fechas_validas.min().date()
-fecha_max = fechas_validas.max().date()
+df_limites = load_csv_from_uploaded_or_default(uploaded)
 
-rango_fechas = st.sidebar.date_input("Rango de fechas", [fecha_min, fecha_max])
-
-# ===============================
-# FILTRO PRINCIPAL
-# ===============================
-df_filt = df_all[
-    (df_all["linea"] == linea_sel) &
-    (df_all["categoria"] == categoria_sel) &
-    (df_all["maquina"] == maquina_sel)
-].copy()
-
-df_filt = df_filt[
-    (df_filt["Date"] >= pd.to_datetime(rango_fechas[0])) &
-    (df_filt["Date"] <= pd.to_datetime(rango_fechas[-1]))
-]
-
-# ===============================
-# BUSCAR LÍMITES
-# ===============================
-limite_row = df_limites[
-    (df_limites["maquina"] == maquina_sel) &
-    (df_limites["variable"] == metrica_sel)
-]
-
-# ===============================
-# TÍTULO
-# ===============================
-st.title(f"Dashboard – {linea_sel} / {categoria_sel} / {maquina_sel}")
-st.subheader(f"Métrica: **{metrica_sel}**")
-
-if df_filt.empty:
-    st.error("⚠ No hay datos con estos filtros.")
+if df_limites is None:
+    st.info("No se ha cargado ningún CSV aún. Sube un archivo o coloca ./data/limites.csv en el repositorio.")
     st.stop()
 
-# ===============================
-# GRAFICO PRINCIPAL CON LÍMITES
-# ===============================
-fig1, ax1 = plt.subplots()
-ax1.plot(df_filt["Date"], df_filt[metrica_sel], label="Valor")
+st.markdown("## Vista previa del CSV original")
+with st.expander("Mostrar CSV original"):
+    st.write("shape:", df_limites.shape)
+    st.write(df_limites.head())
 
-# Agrega líneas de límites si existen
-if not limite_row.empty:
-    ax1.axhline(limite_row.iloc[0]["LimiteSuperior"], color="red", linestyle="--", label="Límite Superior")
-    ax1.axhline(limite_row.iloc[0]["LimiteInferior"], color="green", linestyle="--", label="Límite Inferior")
+# Intentar normalizar automáticamente
+normalized = None
+error_msg = None
+try:
+    normalized = normalize_df_limites(df_limites)
+except Exception as exc:
+    error_msg = str(exc)
 
-ax1.set_title("Tendencia de la métrica")
-ax1.set_xlabel("Fecha")
-ax1.set_ylabel(metrica_sel)
-ax1.legend()
-st.pyplot(fig1)
+if normalized is not None:
+    st.success("El DataFrame se normalizó correctamente a las columnas esperadas.")
+    st.write("shape:", normalized.shape)
+    st.write("columns:", normalized.columns.tolist())
+    st.dataframe(normalized.head())
+    # Aquí continúa el resto de la lógica de tu app usando `normalized` como df_limites
+    df_limites = normalized
+    # Ejemplo simple: mostrar conteo por máquina
+    st.markdown("### Conteo por máquina")
+    try:
+        st.bar_chart(df_limites["maquina"].value_counts())
+    except Exception:
+        st.info("No se pudo graficar conteo por máquina (revisa los valores).")
+else:
+    st.error("No se pudo normalizar automáticamente el DataFrame.")
+    st.write("Detalle del intento:", error_msg)
+    st.markdown("### Información para depuración")
+    st.write("shape:", df_limites.shape)
+    st.write("columns:", df_limites.columns.tolist())
+    st.write(df_limites.head())
 
-# ===============================
-# GRAFICO 2 – HISTOGRAMA
-# ===============================
-fig2, ax2 = plt.subplots()
-ax2.hist(df_filt[metrica_sel], bins=20)
-ax2.set_title("Distribución de valores (Histograma)")
-ax2.set_xlabel(metrica_sel)
-ax2.set_ylabel("Frecuencia")
-st.pyplot(fig2)
+    # UX: permitir al usuario mapear manualmente las columnas
+    st.markdown("---")
+    st.markdown("Puedes mapear manualmente las columnas actuales a las columnas esperadas.")
+    cols = df_limites.columns.tolist()
+    mapping = {}
+    cols_with_none = ["<NINGUNA>"] + cols
+    for target in expected_cols:
+        mapping[target] = st.selectbox(f"Columna para '{target}'", cols_with_none, key=target)
 
-# ===============================
-# GRAFICO 3 – BOXPLOT
-# ===============================
-fig3, ax3 = plt.subplots()
-ax3.boxplot(df_filt[metrica_sel].dropna())
-ax3.set_title("Variabilidad (Boxplot)")
-ax3.set_ylabel(metrica_sel)
-st.pyplot(fig3)
+    if st.button("Aplicar mapeo manual"):
+        # Validaciones
+        chosen = [v for v in mapping.values() if v != "<NINGUNA>"]
+        if len(chosen) != len(expected_cols):
+            st.error("Debes seleccionar una columna real para cada campo (no dejar '<NINGUNA>').")
+        elif len(set(chosen)) != len(chosen):
+            st.error("Hay columnas repetidas en el mapeo. Cada columna debe usarse una sola vez.")
+        else:
+            # Renombrar
+            rename_dict = {mapping[target]: target for target in expected_cols}
+            try:
+                df_mapped = df_limites.rename(columns=rename_dict).copy()
+                # Asegurar que ahora exactamente las columnas esperadas existan y en el orden correcto
+                df_mapped = df_mapped[expected_cols]
+                st.success("Mapeo aplicado con éxito.")
+                st.write("shape:", df_mapped.shape)
+                st.write("columns:", df_mapped.columns.tolist())
+                st.dataframe(df_mapped.head())
+                # Asignar para uso posterior
+                df_limites = df_mapped
+            except Exception as e:
+                st.error(f"Error al aplicar el mapeo: {e}")
 
-# ===============================
-# GRAFICO 4 – DISPERSIÓN VS TIEMPO
-# ===============================
-fig4, ax4 = plt.subplots()
-ax4.scatter(df_filt["Date"], df_filt[metrica_sel], alpha=0.7)
-ax4.set_title("Dispersión de mediciones")
-ax4.set_xlabel("Fecha")
-ax4.set_ylabel(metrica_sel)
-st.pyplot(fig4)
+    st.stop()
 
-# ===============================
-# TABLA FINAL
-# ===============================
-st.subheader("Datos filtrados")
-st.dataframe(df_filt[["Date", "Time", "maquina", "linea", "categoria", metrica_sel]])
+# Aquí continúa el resto de tu app que depende de df_limites ya normalizado.
+# Reemplaza / amplía la lógica siguiente con lo que tu app necesite.
+
+st.markdown("### Datos finales preparados")
+st.write("shape:", df_limites.shape)
+st.write("columns:", df_limites.columns.tolist())
+st.dataframe(df_limites.head())
