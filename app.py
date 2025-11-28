@@ -1,119 +1,155 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
+import plotly.express as px
 
-# =============================
-#      CARGA DE ARCHIVOS
-# =============================
+st.set_page_config(page_title="Dashboard CD/CW", layout="wide")
 
+# --------------------------------
+# CARGA DE DATOS
+# --------------------------------
+@st.cache_data
+def load_data():
+    cd = pd.read_csv("CD_unificado.csv")
+    cw = pd.read_csv("CW_unificado.csv")
+
+    limites = pd.read_excel("Limites en tablas (2).xlsx")
+    limites.columns = [
+        "CD_maquina","CD_variable","CD_lim_inf","CD_lim_sup",
+        "CW_maquina","CW_variable","CW_lim_inf","CW_lim_sup"
+    ]
+
+    # convertir limites CD
+    limites_cd = limites[["CD_maquina","CD_variable","CD_lim_inf","CD_lim_sup"]].rename(
+        columns={"CD_maquina":"maquina","CD_variable":"variable",
+                 "CD_lim_inf":"lim_inf","CD_lim_sup":"lim_sup"}
+    )
+    limites_cd["tipo"] = "CD"
+
+    # convertir limites CW
+    limites_cw = limites[["CW_maquina","CW_variable","CW_lim_inf","CW_lim_sup"]].rename(
+        columns={"CW_maquina":"maquina","CW_variable":"variable",
+                 "CW_lim_inf":"lim_inf","CW_lim_sup":"lim_sup"}
+    )
+    limites_cw["tipo"] = "CW"
+
+    limites_total = pd.concat([limites_cd, limites_cw])
+    limites_total["variable_norm"] = limites_total["variable"].str.replace("_", "").str.replace(" ", "").str.lower()
+
+    return cd, cw, limites_total
+
+
+cd_raw, cw_raw, limites_df = load_data()
+
+# --------------------------------
+# NORMALIZADOR
+# --------------------------------
+def normalizar_variable(v):
+    return v.replace("_", "").replace(" ", "").strip().lower()
+
+# --------------------------------
+# IDENTIFICAR VARIABLES
+# --------------------------------
+vars_cd = [c for c in cd_raw.columns if "Get_Angle" in c or "Get Angle" in c]
+vars_cw = [c for c in cw_raw.columns if "Get_Angle" in c or "Get Angle" in c]
+
+# --------------------------------
+# FORMATO LONG
+# --------------------------------
+def melt_df(df, variables):
+    long_df = df.melt(
+        id_vars=["maquina","Date","Time"],
+        value_vars=variables,
+        var_name="variable",
+        value_name="valor"
+    )
+    long_df["timestamp"] = long_df["Date"].astype(str) + " " + long_df["Time"].astype(str)
+    return long_df
+
+cd_df = melt_df(cd_raw, vars_cd)
+cw_df = melt_df(cw_raw, vars_cw)
+
+cd_df["valor"] = pd.to_numeric(cd_df["valor"], errors="coerce")
+cw_df["valor"] = pd.to_numeric(cw_df["valor"], errors="coerce")
+
+# --------------------------------
+# UI
+# --------------------------------
 st.title("📊 Dashboard de Límites CD / CW")
 
-# Cargar bases originales
-df = pd.read_excel("CD_unificado.xlsx")
-df_limites = pd.read_excel("limites.xlsx")
+tipo = st.sidebar.selectbox("Tipo de datos", ["CD", "CW"])
+df = cd_df if tipo == "CD" else cw_df
 
-# Normalizar nombres
-df.columns = df.columns.str.strip()
-df_limites.columns = df_limites.columns.str.strip()
+maquinas = sorted(df["maquina"].unique())
+maq = st.sidebar.selectbox("Máquina", maquinas)
+df_m = df[df["maquina"] == maq]
 
-# =============================
-#   DETECTAR COLUMNA DE MÁQUINA EN LÍMITES
-# =============================
+variables = sorted(df_m["variable"].unique())
+var = st.sidebar.selectbox("Variable", variables)
+df_v = df_m[df_m["variable"] == var].copy()
 
-col_maquina_lim = None
-for col in df_limites.columns:
-    # Detecta si una columna contiene nombres como:
-    # CW, CD, FVT7_CW, FVT100_CD, etc.
-    if df_limites[col].astype(str).str.contains("CW|CD|FVT", case=False).any():
-        col_maquina_lim = col
-        break
+df_v["valor"] = pd.to_numeric(df_v["valor"], errors="coerce")
+df_v = df_v.dropna(subset=["valor"])
 
-if col_maquina_lim is None:
-    st.error("❌ No se encontró columna que contenga las máquinas en el archivo de límites.")
-    st.stop()
+var_norm = normalizar_variable(var)
 
-st.sidebar.markdown("### Tipo de datos")
-tipo_datos = st.sidebar.selectbox("Selecciona tipo:", ["CD", "CW"])
-
-# =============================
-#   SLIDERS DEPENDIENTES
-# =============================
-
-st.sidebar.markdown("### Máquina")
-maquinas = sorted(df["maquina"].dropna().unique())
-maquina = st.sidebar.selectbox("Selecciona máquina:", maquinas)
-
-# Variables dentro de esa máquina
-st.sidebar.markdown("### Variable")
-variables = sorted(df[df["maquina"] == maquina]["variable"].dropna().unique())
-variable = st.sidebar.selectbox("Selecciona variable:", variables)
-
-st.markdown("## 📊 Dashboard de Límites")
-
-# =============================
-#   FILTRAR DATOS PRINCIPALES
-# =============================
-
-df_v = df[(df["maquina"] == maquina) & (df["variable"] == variable)].copy()
-df_v = df_v.sort_values("fecha")
-
-if df_v.empty:
-    st.error("⚠ No hay datos disponibles para esta máquina y variable.")
-    st.stop()
-
-# =============================
-#   FILTRAR LÍMITES
-# =============================
-
-df_lims = df_limites[
-    (df_limites[col_maquina_lim].astype(str).str.strip() == maquina.strip()) &
-    (df_limites["Variable"].astype(str).str.strip() == variable.strip())
+# --------------------------------
+# OBTENER LÍMITES
+# --------------------------------
+lim = limites_df[
+    (limites_df["maquina"].str.lower() == maq.lower()) &
+    (limites_df["variable_norm"] == var_norm) &
+    (limites_df["tipo"] == tipo)
 ]
 
-if df_lims.empty:
-    st.error("⚠ No se encontraron límites para esta máquina y variable.")
-    st.stop()
+lim_inf = lim["lim_inf"].values[0] if not lim.empty else None
+lim_sup = lim["lim_sup"].values[0] if not lim.empty else None
 
-lim_inf = df_lims["Limite inferior"].values[0]
-lim_sup = df_lims["Limite superior"].values[0]
+# --------------------------------
+# MARCAR FUERA DE LÍMITE
+# --------------------------------
+df_v["fuera"] = False
+if lim_inf is not None:
+    df_v.loc[df_v["valor"] < lim_inf, "fuera"] = True
+if lim_sup is not None:
+    df_v.loc[df_v["valor"] > lim_sup, "fuera"] = True
 
-# =============================
-#   CÁLCULO DE KPIs
-# =============================
-
-fuera = df_v[(df_v["valor"] < lim_inf) | (df_v["valor"] > lim_sup)]
-pct_fuera = (len(fuera) / len(df_v)) * 100 if len(df_v) > 0 else 0
+# --------------------------------
+# KPIs
+# --------------------------------
+st.subheader("📌 Indicadores clave (KPI)")
 
 col1, col2, col3 = st.columns(3)
-col1.metric("Promedio", f"{df_v['valor'].mean():.2f}")
-col2.metric("Último valor", f"{df_v['valor'].iloc[-1]:.2f}")
-col3.metric("% Fuera de límites", f"{pct_fuera:.1f}%")
 
-# =============================
-#         GRÁFICA
-# =============================
+promedio = df_v["valor"].mean() if not df_v.empty else 0
+ultimo = df_v["valor"].iloc[-1] if not df_v.empty else 0
+fuera_pct = df_v["fuera"].mean() * 100 if not df_v.empty else 0
 
-st.markdown("### 📈 Gráfica de tendencia")
+col1.metric("Promedio", f"{promedio:.2f}")
+col2.metric("Último valor", f"{ultimo:.2f}")
+col3.metric("% Fuera de límites", f"{fuera_pct:.1f}%")
 
-fig, ax = plt.subplots(figsize=(10, 4))
-ax.plot(df_v["fecha"], df_v["valor"], label="Valor")
-ax.axhline(lim_inf, color="red", linestyle="--", label="Límite inferior")
-ax.axhline(lim_sup, color="red", linestyle="--", label="Límite superior")
-ax.set_xlabel("Fecha")
-ax.set_ylabel("Valor")
-ax.legend()
-st.pyplot(fig)
+# --------------------------------
+# GRÁFICAS
+# --------------------------------
+st.subheader("📈 Gráfico de Control")
 
-# =============================
-#   TABLA DE DATOS
-# =============================
+fig = px.line(df_v, x="timestamp", y="valor", title=f"{maq} — {var}")
 
-st.markdown("### 📋 Datos filtrados")
-st.dataframe(df_v)
+media = df_v["valor"].mean()
+fig.add_hline(y=media, line_dash="solid", line_color="blue", annotation_text="Media")
 
-# =============================
-#   TABLA DE LÍMITES
-# =============================
+if lim_inf is not None:
+    fig.add_hline(y=lim_inf, line_dash="dot", line_color="red", annotation_text="Límite Inferior")
+if lim_sup is not None:
+    fig.add_hline(y=lim_sup, line_dash="dot", line_color="red", annotation_text="Límite Superior")
 
-st.markdown("### 📘 Límites aplicados")
-st.dataframe(df_lims)
+df_fuera = df_v[df_v["fuera"] == True]
+fig.add_scatter(
+    x=df_fuera["timestamp"],
+    y=df_fuera["valor"],
+    mode="markers",
+    marker=dict(color="red", size=10),
+    name="Fuera de control",
+)
+
+st.plotly_chart(fig, use_container_width=True)
