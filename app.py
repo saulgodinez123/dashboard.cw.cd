@@ -1,129 +1,102 @@
+import streamlit as st
 import pandas as pd
-from jupyter_dash import JupyterDash
-from dash import Dash, dcc, html, Input, Output, dash_table
 import plotly.express as px
+import os
 
 # ============================
-#      LECTURA DEL ARCHIVO
+# CARGA DE ARCHIVOS
 # ============================
+@st.cache_data
+def load_data():
+    # Buscar automáticamente cualquier Excel en la carpeta
+    archivos = [f for f in os.listdir() if f.lower().endswith(".xlsx")]
 
-def cargar_archivo():
-    try:
-        # Usa engine openpyxl porque tu archivo tiene MUCHAS columnas
-        df = pd.read_excel("MANT.xlsx", engine="openpyxl")
+    if len(archivos) == 0:
+        st.error("No se encontró ningún archivo .xlsx en el directorio.")
+        return None
+    
+    archivo = archivos[0]  # toma el primero
+    df = pd.read_excel(archivo)
 
-        # Limpieza automática de nombres de columnas
-        df.columns = (
-            df.columns.astype(str)
-            .str.replace("\n", "_")
-            .str.replace(" ", "_")
-            .str.replace("-", "_")
-            .str.replace("__", "_")
-        )
+    return df
 
-        # Manejar columnas duplicadas
-        df = df.loc[:, ~df.columns.duplicated()]
+df = load_data()
 
-        return df
+if df is None:
+    st.stop()
 
-    except Exception as e:
-        print("Error al cargar archivo:", e)
-        return pd.DataFrame()
-
-
-df = cargar_archivo()
+st.title("Dashboard CD / CW")
 
 # ============================
-#       APP DASH
+# OBTENER OPCIONES DINÁMICAS
 # ============================
 
-app = JupyterDash(__name__)
+# Buscar columna que identifique estación (FVT100, FVT7, etc)
+col_estacion = None
+for col in df.columns:
+    if "fvt" in col.lower() or "estacion" in col.lower():
+        col_estacion = col
+        break
 
-app.layout = html.Div([
+if col_estacion is None:
+    st.error("No se encontró columna de estación (FVT...).")
+    st.stop()
 
-    html.H1("Dashboard CD / CW", style={"textAlign": "center"}),
+# CD / CW
+col_cd_cw = None
+for col in df.columns:
+    if col.lower() in ["cd/cw", "mode", "tipo", "cdcw"]:
+        col_cd_cw = col
+        break
 
-    html.Div([
-        html.Label("Selecciona Modelo:"),
-        dcc.Dropdown(
-            id="filtro_modelo",
-            options=[{"label": m, "value": m} for m in sorted(df["Model"].unique())] if "Model" in df.columns else [],
-            placeholder="Modelo"
-        )
-    ]),
+if col_cd_cw is None:
+    st.error("No se encontró columna CD/CW.")
+    st.stop()
 
-    html.Div([
-        html.Label("Selecciona Línea:"),
-        dcc.Dropdown(
-            id="filtro_linea",
-            options=[{"label": m, "value": m} for m in sorted(df["linea"].unique())] if "linea" in df.columns else [],
-            placeholder="Línea"
-        )
-    ]),
-
-    html.Div([
-        html.Label("Selecciona Categoría:"),
-        dcc.Dropdown(
-            id="filtro_categoria",
-            options=[{"label": m, "value": m} for m in sorted(df["categoria"].unique())] if "categoria" in df.columns else [],
-            placeholder="Categoría"
-        )
-    ]),
-
-    html.Br(),
-
-    html.Div(id="mensaje_error", style={"color": "red", "fontWeight": "bold"}),
-
-    dash_table.DataTable(
-        id="tabla_filtrada",
-        page_size=20,
-        style_table={"overflowX": "scroll"},
-        style_cell={"textAlign": "left", "minWidth": "150px"}
-    )
-])
+# Métricas = todas las columnas numéricas excepto las de identificación
+metric_columns = df.select_dtypes(include="number").columns.tolist()
 
 # ============================
-# CALLBACK DE FILTRO
+# SIDEBAR
 # ============================
+with st.sidebar:
+    st.header("Filtros")
 
-@app.callback(
-    Output("tabla_filtrada", "data"),
-    Output("tabla_filtrada", "columns"),
-    Output("mensaje_error", "children"),
-    Input("filtro_modelo", "value"),
-    Input("filtro_linea", "value"),
-    Input("filtro_categoria", "value")
+    filtro_estacion = st.selectbox("Estación", ["Todas"] + sorted(df[col_estacion].dropna().unique().tolist()))
+    filtro_cd_cw = st.selectbox("CD/CW", ["Todas"] + sorted(df[col_cd_cw].dropna().unique().tolist()))
+    filtro_metrica = st.selectbox("Métrica", metric_columns)
+
+# ============================
+# FILTRAR DATOS
+# ============================
+df_filtro = df.copy()
+
+if filtro_estacion != "Todas":
+    df_filtro = df_filtro[df_filtro[col_estacion] == filtro_estacion]
+
+if filtro_cd_cw != "Todas":
+    df_filtro = df_filtro[df_filtro[col_cd_cw] == filtro_cd_cw]
+
+# ============================
+# VALIDAR SI HAY DATOS
+# ============================
+if df_filtro.empty:
+    st.warning("No hay registros para los filtros seleccionados.")
+    st.stop()
+
+# ============================
+# EJEMPLO DE GRÁFICA
+# ============================
+st.subheader(f"Distribución de la métrica: {filtro_metrica}")
+
+fig = px.histogram(
+    df_filtro,
+    x=filtro_metrica,
+    nbins=20,
+    title=f"Histograma de {filtro_metrica}"
 )
-def actualizar_tabla(modelo, linea, categoria):
 
-    if df.empty:
-        return [], [], "⚠ No se pudo leer el archivo MANT.xlsx"
+st.plotly_chart(fig, use_container_width=True)
 
-    df_filtrado = df.copy()
-
-    if modelo:
-        df_filtrado = df_filtrado[df_filtrado["Model"] == modelo]
-
-    if linea:
-        df_filtrado = df_filtrado[df_filtrado["linea"] == linea]
-
-    if categoria:
-        df_filtrado = df_filtrado[df_filtrado["categoria"] == categoria]
-
-    if df_filtrado.empty:
-        return [], [], "⚠ No hay registros para los filtros seleccionados."
-
-    return (
-        df_filtrado.to_dict("records"),
-        [{"name": c, "id": c} for c in df_filtrado.columns],
-        ""
-    )
-
-
-# ============================
-# EJECUCIÓN
-# ============================
-
-if __name__ == "__main__":
-    app.run_server(debug=True, mode="inline")
-
+# Mostrar tabla filtrada
+st.dataframe(df_filtro)
