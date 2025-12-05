@@ -1,118 +1,244 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
+import plotly.express as px
 
-# ======================================================
-# 1. CARGA DE DATOS
-# ======================================================
-def cargar_datos(file):
-    df = pd.read_excel(file)
-    return df
+st.set_page_config(page_title="Dashboard CD/CW", layout="wide")
 
+# --------------------------------
+# CARGA DE DATOS
+# --------------------------------
+@st.cache_data
+def load_data():
+    cd = pd.read_csv("CD_unificado.csv")
+    cw = pd.read_csv("CW_unificado.csv")
 
-# ======================================================
-# 2. LIMPIEZA GENERAL
-# ======================================================
-def limpiar_dataframe(df):
-    df = df.copy()
-    df.columns = df.columns.str.strip()
-    return df
+    limites = pd.read_excel("Limites en tablas (2).xlsx")
+    limites.columns = [
+        "CD_maquina","CD_variable","CD_lim_inf","CD_lim_sup",
+        "CW_maquina","CW_variable","CW_lim_inf","CW_lim_sup"
+    ]
 
-
-# ======================================================
-# 3. CÁLCULO DE LÍMITES
-# ======================================================
-def calcular_limites(df, columna, lsl, usl):
-    df = df.copy()
-    df["Fuera_de_Limites"] = (df[columna] < lsl) | (df[columna] > usl)
-    return df
-
-
-# ======================================================
-# 4. PORCENTAJE FUERA DE LÍMITES (FILTRADO POR CATEGORÍA)
-# ======================================================
-def porcentaje_fuera(df, columna_categoria, columna_valor, lsl, usl):
-    df = df.copy()
-    
-    df["Fuera"] = (df[columna_valor] < lsl) | (df[columna_valor] > usl)
-
-    resumen = (
-        df.groupby(columna_categoria)
-        .agg(
-            Total=("Fuera", "count"),
-            Fuera_Limite=("Fuera", "sum")
-        )
-        .assign(Porcentaje=lambda x: x["Fuera_Limite"] / x["Total"])
+    # convertir limites CD
+    limites_cd = limites[["CD_maquina","CD_variable","CD_lim_inf","CD_lim_sup"]].rename(
+        columns={"CD_maquina":"maquina","CD_variable":"variable",
+                 "CD_lim_inf":"lim_inf","CD_lim_sup":"lim_sup"}
     )
+    limites_cd["tipo"] = "CD"
 
-    return resumen.reset_index()
+    # convertir limites CW
+    limites_cw = limites[["CW_maquina","CW_variable","CW_lim_inf","CW_lim_sup"]].rename(
+        columns={"CW_maquina":"maquina","CW_variable":"variable",
+                 "CW_lim_inf":"lim_inf","CW_lim_sup":"lim_sup"}
+    )
+    limites_cw["tipo"] = "CW"
 
+    limites_total = pd.concat([limites_cd, limites_cw], ignore_index=True)
 
-# ======================================================
-# 5. PIPELINE PRINCIPAL
-# ======================================================
-def ejecutar_pipeline(file):
-    df = cargar_datos(file)
-    df = limpiar_dataframe(df)
+    # Normalizar variable
+    limites_total["variable_norm"] = limites_total["variable"].astype(str)\
+        .str.replace("_", "").str.replace(" ", "").str.lower()
 
-    return df
+    return cd, cw, limites_total
 
+cd_raw, cw_raw, limites_df = load_data()
 
-# ======================================================
-# 6. INTERFAZ STREAMLIT (DASHBOARD)
-# ======================================================
+# --------------------------------
+# NORMALIZADOR CONSISTENTE
+# --------------------------------
+def normalizar_variable(v):
+    return str(v).replace("_", "").replace(" ", "").strip().lower()
 
-st.title("Dashboard de Control de Proceso")
+# --------------------------------
+# IDENTIFICAR VARIABLES
+# --------------------------------
+vars_cd = [c for c in cd_raw.columns if "Get_Angle" in c or "Get Angle" in c]
+vars_cw = [c for c in cw_raw.columns if "Get_Angle" in c or "Get Angle" in c]
 
-uploaded = st.file_uploader("Sube el archivo Excel con los datos", type=["xlsx"])
+# --------------------------------
+# FORMATO LONG
+# --------------------------------
+def melt_df(df, variables):
+    long_df = df.melt(
+        id_vars=["maquina","Date","Time"],
+        value_vars=variables,
+        var_name="variable",
+        value_name="valor"
+    )
+    long_df["timestamp"] = long_df["Date"].astype(str) + " " + long_df["Time"].astype(str)
+    return long_df
 
-if uploaded:
-    st.success("Archivo cargado correctamente ✔️")
+cd_df = melt_df(cd_raw, vars_cd) if len(vars_cd)>0 else pd.DataFrame(columns=["maquina","Date","Time","variable","valor","timestamp"])
+cw_df = melt_df(cw_raw, vars_cw) if len(vars_cw)>0 else pd.DataFrame(columns=["maquina","Date","Time","variable","valor","timestamp"])
 
-    df = ejecutar_pipeline(uploaded)
+cd_df["valor"] = pd.to_numeric(cd_df["valor"], errors="coerce")
+cw_df["valor"] = pd.to_numeric(cw_df["valor"], errors="coerce")
 
-    st.subheader("Vista previa del dataset")
-    st.dataframe(df.head())
+# Normalizar columnas
+cd_df["variable_norm"] = cd_df["variable"].apply(normalizar_variable)
+cw_df["variable_norm"] = cw_df["variable"].apply(normalizar_variable)
 
-    # Selección de variables numéricas
-    variables_numericas = df.select_dtypes(include=np.number).columns.tolist()
+# --------------------------------
+# UI STREAMLIT
+# --------------------------------
+st.title("📊 Dashboard de Límites CD / CW")
 
-    st.subheader("Configuración del análisis")
+tipo = st.sidebar.selectbox("Tipo de datos", ["CD", "CW"])
+df = cd_df if tipo == "CD" else cw_df
 
-    categoria = st.selectbox("Selecciona la categoría (agrupación):", df.columns)
+# Selección de máquina
+maquinas = sorted(df["maquina"].dropna().unique())
+if not maquinas:
+    st.error("No se encontraron máquinas en los datos. Revisa tus CSVs.")
+    st.stop()
 
-    variable = st.selectbox("Selecciona la variable a analizar:", variables_numericas)
+maq = st.sidebar.selectbox("Máquina", maquinas)
+df_m = df[df["maquina"] == maq]
 
-    col1, col2 = st.columns(2)
-    with col1:
-        lsl = st.number_input("LSL (límite inferior)", value=float(df[variable].min()))
-    with col2:
-        usl = st.number_input("USL (límite superior)", value=float(df[variable].max()))
+# Variables basadas en límites
+vars_limite = limites_df[
+    (limites_df["maquina"].astype(str).str.lower() == str(maq).lower()) &
+    (limites_df["tipo"] == tipo)
+]["variable"].unique()
 
-    # Cálculo de porcentaje fuera
-    resultado = porcentaje_fuera(df, categoria, variable, lsl, usl)
+# fallback
+if len(vars_limite) == 0:
+    vars_limite = df_m["variable"].dropna().unique()
 
-    st.subheader("Porcentaje fuera de límites")
-    st.dataframe(resultado)
+vars_limite = sorted(vars_limite)
+var = st.sidebar.selectbox("Variable", vars_limite)
 
-    # Guardar resultados
-    nombre_salida = "resultados_proceso.xlsx"
-    resultado.to_excel(nombre_salida, index=False)
+# Normalizar variable seleccionada
+var_norm = normalizar_variable(var)
 
-    with open(nombre_salida, "rb") as f:
-        st.download_button(
-            label="📥 Descargar resultados",
-            data=f,
-            file_name=nombre_salida,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+# Filtrar dataset con variable_norm
+df_v = df_m[df_m["variable_norm"] == var_norm].copy()
+df_v = df_v.dropna(subset=["valor"])
+
+# --------------------------------
+# OBTENER LÍMITES REALES
+# --------------------------------
+lim = limites_df[
+    (limites_df["maquina"].astype(str).str.lower() == str(maq).lower()) &
+    (limites_df["variable_norm"] == var_norm) &
+    (limites_df["tipo"] == tipo)
+]
+
+lim_inf = lim["lim_inf"].values[0] if not lim.empty else None
+lim_sup = lim["lim_sup"].values[0] if not lim.empty else None
+
+# --------------------------------
+# MARCAR OUTLIERS
+# --------------------------------
+if df_v.empty:
+    mask_out = pd.Series([], dtype=bool)
+else:
+    if lim_inf is None and lim_sup is None:
+        mask_out = pd.Series([False]*len(df_v), index=df_v.index)
+    elif lim_inf is None:
+        mask_out = df_v["valor"] > lim_sup
+    elif lim_sup is None:
+        mask_out = df_v["valor"] < lim_inf
+    else:
+        mask_out = (df_v["valor"] < lim_inf) | (df_v["valor"] > lim_sup)
+
+df_v["fuera"] = mask_out
+count_out = mask_out.sum()
+pct_out = (count_out / len(df_v) * 100) if len(df_v)>0 else 0
+
+# --------------------------------
+# KPIs
+# --------------------------------
+st.subheader("📌 Indicadores clave (KPI)")
+
+col1, col2, col3 = st.columns(3)
+
+promedio = df_v["valor"].mean() if not df_v.empty else 0
+ultimo = df_v["valor"].iloc[-1] if not df_v.empty else 0
+
+col1.metric("Promedio", f"{promedio:.2f}")
+col2.metric("Último valor", f"{ultimo:.2f}")
+col3.metric("Fuera de límites", f"{count_out} pts ({pct_out:.1f}%)")
+
+# --------------------------------
+# GRÁFICO DE CONTROL
+# --------------------------------
+st.subheader("📈 Gráfico de Control")
+
+if df_v.empty:
+    st.warning("No hay datos válidos para esta variable.")
+else:
+    fig = px.line(df_v, x="timestamp", y="valor", title=f"{maq} — {var}", markers=False)
+
+    media = promedio
+    fig.add_hline(y=media, line_dash="solid", annotation_text="Media")
+
+    if lim_inf is not None:
+        fig.add_hline(y=lim_inf, line_dash="dot", annotation_text="Límite Inferior")
+    if lim_sup is not None:
+        fig.add_hline(y=lim_sup, line_dash="dot", annotation_text="Límite Superior")
+
+    df_out = df_v[df_v["fuera"]]
+    if not df_out.empty:
+        fig.add_scatter(
+            x=df_out["timestamp"], y=df_out["valor"],
+            mode="markers",
+            marker=dict(color="red", size=10),
+            name="Fuera de límites"
         )
 
-    # GRÁFICOS
-    st.subheader("Distribución de valores")
-    st.bar_chart(df[variable])
+    st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Valores fuera de límite por categoría")
-    st.bar_chart(resultado.set_index(categoria)["Porcentaje"])
+    if not df_out.empty:
+        st.markdown("#### ⚠ Valores fuera de límites")
+        st.dataframe(df_out.reset_index(drop=True))
 
+# --------------------------------
+# TABS: HISTOGRAMA - BOXPLOT - SCATTER - POR HORA
+# --------------------------------
+tab1, tab2, tab3, tab4 = st.tabs(["Histograma", "Boxplot", "Scatter", "Promedio por hora"])
+
+with tab1:
+    if df_v.empty:
+        st.info("No hay datos para histograma.")
+    else:
+        fig_hist = px.histogram(df_v, x="valor", nbins=30, title="Histograma")
+        if lim_inf is not None: fig_hist.add_vline(x=lim_inf)
+        if lim_sup is not None: fig_hist.add_vline(x=lim_sup)
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+with tab2:
+    if df_v.empty:
+        st.info("No hay datos para boxplot.")
+    else:
+        fig_box = px.box(df_v, y="valor", points="outliers", title="Boxplot")
+        st.plotly_chart(fig_box, use_container_width=True)
+
+with tab3:
+    if df_v.empty:
+        st.info("No hay datos para scatter.")
+    else:
+        fig_sc = px.scatter(df_v, x="timestamp", y="valor", title="Scatter")
+        if lim_inf is not None: fig_sc.add_hline(y=lim_inf)
+        if lim_sup is not None: fig_sc.add_hline(y=lim_sup)
+        st.plotly_chart(fig_sc, use_container_width=True)
+
+with tab4:
+    if df_v.empty:
+        st.info("No hay datos para agrupar por hora.")
+    else:
+        df_v["hour"] = pd.to_datetime(df_v["Time"], errors="coerce").dt.hour
+        df_hour = df_v.groupby("hour", as_index=False)["valor"].mean().dropna()
+        fig_hour = px.bar(df_hour, x="hour", y="valor", title="Promedio por hora")
+        st.plotly_chart(fig_hour, use_container_width=True)
+
+# --------------------------------
+# TABLAS
+# --------------------------------
+st.markdown("### 📋 Datos filtrados")
+st.dataframe(df_v.reset_index(drop=True))
+
+st.markdown("### 📘 Límites aplicados (según Excel)")
+if not lim.empty:
+    st.dataframe(lim.reset_index(drop=True))
 else:
-    st.info("Por favor sube un archivo Excel para comenzar.")
+    st.info("No se encontraron límites para esta selección.")
