@@ -33,15 +33,17 @@ def load_data():
     limites_cw["tipo"] = "CW"
 
     limites_total = pd.concat([limites_cd, limites_cw], ignore_index=True)
-    # normalized variable name to help matching
-    limites_total["variable_norm"] = limites_total["variable"].astype(str).str.replace("_","").str.replace(" ","").str.lower()
+
+    # Normalizar variable
+    limites_total["variable_norm"] = limites_total["variable"].astype(str)\
+        .str.replace("_", "").str.replace(" ", "").str.lower()
 
     return cd, cw, limites_total
 
 cd_raw, cw_raw, limites_df = load_data()
 
 # --------------------------------
-# NORMALIZADOR DE VARIABLES
+# NORMALIZADOR CONSISTENTE
 # --------------------------------
 def normalizar_variable(v):
     return str(v).replace("_", "").replace(" ", "").strip().lower()
@@ -68,9 +70,12 @@ def melt_df(df, variables):
 cd_df = melt_df(cd_raw, vars_cd) if len(vars_cd)>0 else pd.DataFrame(columns=["maquina","Date","Time","variable","valor","timestamp"])
 cw_df = melt_df(cw_raw, vars_cw) if len(vars_cw)>0 else pd.DataFrame(columns=["maquina","Date","Time","variable","valor","timestamp"])
 
-# ensure numeric
 cd_df["valor"] = pd.to_numeric(cd_df["valor"], errors="coerce")
 cw_df["valor"] = pd.to_numeric(cw_df["valor"], errors="coerce")
+
+# Normalizar columnas
+cd_df["variable_norm"] = cd_df["variable"].apply(normalizar_variable)
+cw_df["variable_norm"] = cw_df["variable"].apply(normalizar_variable)
 
 # --------------------------------
 # UI STREAMLIT
@@ -89,29 +94,29 @@ if not maquinas:
 maq = st.sidebar.selectbox("Máquina", maquinas)
 df_m = df[df["maquina"] == maq]
 
-# SELECCIÓN DE VARIABLE BASADA EN LÍMITES (prioriza límites)
+# Variables basadas en límites
 vars_limite = limites_df[
     (limites_df["maquina"].astype(str).str.lower() == str(maq).lower()) &
     (limites_df["tipo"] == tipo)
 ]["variable"].unique()
 
-# fallback a variables en datos si límites no tienen nada
+# fallback
 if len(vars_limite) == 0:
     vars_limite = df_m["variable"].dropna().unique()
 
 vars_limite = sorted(vars_limite)
 var = st.sidebar.selectbox("Variable", vars_limite)
 
-# Filtrar usando el nombre (normalizar al comparar)
-df_v = df_m[df_m["variable"].astype(str).str.lower() == str(var).lower()].copy()
-# keep original Time/Date columns present in your CSVs
-df_v["valor"] = pd.to_numeric(df_v["valor"], errors="coerce")
+# Normalizar variable seleccionada
+var_norm = normalizar_variable(var)
+
+# Filtrar dataset con variable_norm
+df_v = df_m[df_m["variable_norm"] == var_norm].copy()
 df_v = df_v.dropna(subset=["valor"])
 
 # --------------------------------
-# EXTRAER LÍMITES (usando variable normalizada)
+# OBTENER LÍMITES REALES
 # --------------------------------
-var_norm = normalizar_variable(var)
 lim = limites_df[
     (limites_df["maquina"].astype(str).str.lower() == str(maq).lower()) &
     (limites_df["variable_norm"] == var_norm) &
@@ -122,42 +127,40 @@ lim_inf = lim["lim_inf"].values[0] if not lim.empty else None
 lim_sup = lim["lim_sup"].values[0] if not lim.empty else None
 
 # --------------------------------
-# MARCAR OUTLIERS / FUERA DE LÍMITES (cuento correcto)
+# MARCAR OUTLIERS
 # --------------------------------
-# safe default masks
 if df_v.empty:
     mask_out = pd.Series([], dtype=bool)
 else:
-    if (lim_inf is None) and (lim_sup is None):
-        # no limits -> none out
+    if lim_inf is None and lim_sup is None:
         mask_out = pd.Series([False]*len(df_v), index=df_v.index)
-    elif (lim_inf is None):
+    elif lim_inf is None:
         mask_out = df_v["valor"] > lim_sup
-    elif (lim_sup is None):
+    elif lim_sup is None:
         mask_out = df_v["valor"] < lim_inf
     else:
         mask_out = (df_v["valor"] < lim_inf) | (df_v["valor"] > lim_sup)
 
 df_v["fuera"] = mask_out
-count_out = int(mask_out.sum()) if len(mask_out)>0 else 0
-pct_out = (count_out / len(df_v) * 100) if len(df_v)>0 else 0.0
+count_out = mask_out.sum()
+pct_out = (count_out / len(df_v) * 100) if len(df_v)>0 else 0
 
 # --------------------------------
-# KPIs (muestra count + %)
+# KPIs
 # --------------------------------
 st.subheader("📌 Indicadores clave (KPI)")
 
 col1, col2, col3 = st.columns(3)
 
-promedio = df_v["valor"].mean() if not df_v.empty else 0.0
-ultimo = df_v["valor"].iloc[-1] if not df_v.empty else 0.0
+promedio = df_v["valor"].mean() if not df_v.empty else 0
+ultimo = df_v["valor"].iloc[-1] if not df_v.empty else 0
 
 col1.metric("Promedio", f"{promedio:.2f}")
 col2.metric("Último valor", f"{ultimo:.2f}")
 col3.metric("Fuera de límites", f"{count_out} pts ({pct_out:.1f}%)")
 
 # --------------------------------
-# GRÁFICAS
+# GRÁFICO DE CONTROL
 # --------------------------------
 st.subheader("📈 Gráfico de Control")
 
@@ -165,27 +168,32 @@ if df_v.empty:
     st.warning("No hay datos válidos para esta variable.")
 else:
     fig = px.line(df_v, x="timestamp", y="valor", title=f"{maq} — {var}", markers=False)
-    # add media
-    media = df_v["valor"].mean()
-    fig.add_hline(y=media, line_dash="solid", annotation_text="Media", annotation_position="top left")
-    # add limits if exist
+
+    media = promedio
+    fig.add_hline(y=media, line_dash="solid", annotation_text="Media")
+
     if lim_inf is not None:
-        fig.add_hline(y=lim_inf, line_dash="dot", annotation_text="Límite Inferior", annotation_position="bottom left")
+        fig.add_hline(y=lim_inf, line_dash="dot", annotation_text="Límite Inferior")
     if lim_sup is not None:
-        fig.add_hline(y=lim_sup, line_dash="dot", annotation_text="Límite Superior", annotation_position="top left")
-    # highlight outliers
+        fig.add_hline(y=lim_sup, line_dash="dot", annotation_text="Límite Superior")
+
     df_out = df_v[df_v["fuera"]]
     if not df_out.empty:
-        fig.add_scatter(x=df_out["timestamp"], y=df_out["valor"], mode="markers", marker=dict(color="red", size=10), name="Fuera de límites")
+        fig.add_scatter(
+            x=df_out["timestamp"], y=df_out["valor"],
+            mode="markers",
+            marker=dict(color="red", size=10),
+            name="Fuera de límites"
+        )
+
     st.plotly_chart(fig, use_container_width=True)
 
-    # show outliers table for inspection
     if not df_out.empty:
         st.markdown("#### ⚠ Valores fuera de límites")
         st.dataframe(df_out.reset_index(drop=True))
 
 # --------------------------------
-# HISTOGRAMA, BOXPLOT, SCATTER y POR HORA (opcional)
+# TABS: HISTOGRAMA - BOXPLOT - SCATTER - POR HORA
 # --------------------------------
 tab1, tab2, tab3, tab4 = st.tabs(["Histograma", "Boxplot", "Scatter", "Promedio por hora"])
 
@@ -194,10 +202,8 @@ with tab1:
         st.info("No hay datos para histograma.")
     else:
         fig_hist = px.histogram(df_v, x="valor", nbins=30, title="Histograma")
-        if lim_inf is not None:
-            fig_hist.add_vline(x=lim_inf, line_color="red")
-        if lim_sup is not None:
-            fig_hist.add_vline(x=lim_sup, line_color="red")
+        if lim_inf is not None: fig_hist.add_vline(x=lim_inf)
+        if lim_sup is not None: fig_hist.add_vline(x=lim_sup)
         st.plotly_chart(fig_hist, use_container_width=True)
 
 with tab2:
@@ -212,26 +218,21 @@ with tab3:
         st.info("No hay datos para scatter.")
     else:
         fig_sc = px.scatter(df_v, x="timestamp", y="valor", title="Scatter")
-        if lim_inf is not None:
-            fig_sc.add_hline(y=lim_inf, line_color="red", line_dash="dot")
-        if lim_sup is not None:
-            fig_sc.add_hline(y=lim_sup, line_color="red", line_dash="dot")
+        if lim_inf is not None: fig_sc.add_hline(y=lim_inf)
+        if lim_sup is not None: fig_sc.add_hline(y=lim_sup)
         st.plotly_chart(fig_sc, use_container_width=True)
 
 with tab4:
     if df_v.empty:
         st.info("No hay datos para agrupar por hora.")
     else:
-        try:
-            df_v["hour"] = pd.to_datetime(df_v["Time"], format="%H:%M:%S", errors="coerce").dt.hour
-            df_hour = df_v.groupby("hour", as_index=False)["valor"].mean().dropna()
-            fig_hour = px.bar(df_hour, x="hour", y="valor", title="Promedio por hora")
-            st.plotly_chart(fig_hour, use_container_width=True)
-        except Exception:
-            st.info("Formato de Time no reconocido para agrupación por hora.")
+        df_v["hour"] = pd.to_datetime(df_v["Time"], errors="coerce").dt.hour
+        df_hour = df_v.groupby("hour", as_index=False)["valor"].mean().dropna()
+        fig_hour = px.bar(df_hour, x="hour", y="valor", title="Promedio por hora")
+        st.plotly_chart(fig_hour, use_container_width=True)
 
 # --------------------------------
-# Tabla de datos y límites aplicados
+# TABLAS
 # --------------------------------
 st.markdown("### 📋 Datos filtrados")
 st.dataframe(df_v.reset_index(drop=True))
